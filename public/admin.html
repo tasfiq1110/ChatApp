@@ -154,6 +154,8 @@ tr:hover td{background:rgba(255,255,255,.02);}
       <div class="nav" onclick="go('media')" id="n-media"><span class="nav-ic">🖼️</span>All Media</div>
       <div class="nav" onclick="go('badwords')" id="n-badwords"><span class="nav-ic">🤬</span>Bad Words<span class="nav-badge" id="bwBadge">0</span></div>
       <div class="nav" onclick="go('nudity')" id="n-nudity"><span class="nav-ic">🔞</span>Nudity<span class="nav-badge" id="nudBadge">0</span></div>
+      <div class="nav" onclick="go('wordlist')" id="n-wordlist"><span class="nav-ic">📝</span>Word Lists</div>
+      <div class="nav" onclick="go('words')" id="n-words"><span class="nav-ic">📝</span>Word Lists</div>
       <div class="nav" onclick="go('ipbans')" id="n-ipbans"><span class="nav-ic">🔒</span>IP Bans</div>
       <div class="nav" onclick="go('banned')" id="n-banned"><span class="nav-ic">🚫</span>Banned Users</div>
       <div class="nav" onclick="go('broadcast')" id="n-broadcast"><span class="nav-ic">📢</span>Broadcast</div>
@@ -170,7 +172,7 @@ const G = id => document.getElementById(id);
 let TOKEN = localStorage.getItem('zapp_adm') || '';
 let tab = 'overview';
 let autoRef = null;
-let D = { stats:{}, sessions:[], media:[], violations:[], bannedIPs:[] };
+let D = { stats:{}, sessions:[], media:[], violations:[], bannedIPs:[], words:{} };
 
 // ── Auth ──────────────────────────────────────────────
 async function doLogin() {
@@ -212,18 +214,20 @@ async function api(method, url, body) {
 
 // ── Load ──────────────────────────────────────────────
 async function loadAll() {
-  const [s, sess, media, viol, ips] = await Promise.all([
+  const [s, sess, media, viol, ips, words] = await Promise.all([
     api('GET','/admin/api/stats'),
     api('GET','/admin/api/sessions'),
     api('GET','/admin/api/media'),
     api('GET','/admin/api/violations'),
-    api('GET','/admin/api/banned-ips')
+    api('GET','/admin/api/banned-ips'),
+    api('GET','/admin/api/words')
   ]);
   if (!s) return;
-  D.stats = s; D.sessions = sess||[]; D.media = media||[];
-  D.violations = viol||[]; D.bannedIPs = ips||[];
+  D.stats=s; D.sessions=sess||[]; D.media=media||[];
+  D.violations=viol||[]; D.bannedIPs=ips||[];
+  // Always refresh word lists
+  api('GET','/admin/api/words').then(w=>{ if(w){D.words=w; if(tab==='words')render();} }); D.words=words||{};
   G('liveBadge').textContent = `● ${s.online||0} online`;
-  // Update sidebar badges
   const bw = D.violations.filter(v=>v.type==='badword').length;
   const nu = D.violations.filter(v=>v.type==='nudity').length;
   G('bwBadge').textContent = bw; G('bwBadge').style.display = bw?'':'none';
@@ -240,7 +244,7 @@ function go(t) {
 }
 function render() {
   const c = G('content');
-  const fns = { overview, users, media, badwords, nudity, ipbans, banned, broadcast, analytics };
+  const fns = { overview, users, media, badwords, nudity, words, wordlist, ipbans, banned, broadcast, analytics };
   if (fns[tab]) c.innerHTML = fns[tab]();
 }
 
@@ -426,6 +430,94 @@ function nudity() {
     </div>`).join('')}`;
 }
 
+// ── WORD LISTS ────────────────────────────────────────
+function words() {
+  const w = D.words || { builtinBad:[], customBad:[], builtinNudity:[], customNudity:[] };
+  return `
+  <div class="sh">📝 Word Lists — Live filters applied to all messages</div>
+
+  <!-- BAD WORDS -->
+  <div style="background:var(--s1);border:1px solid var(--bd);border-radius:13px;padding:18px;margin-bottom:18px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:.85rem;font-weight:600;color:var(--ylw);margin-bottom:3px">🤬 Bad Words (Text Filter)</div>
+        <div style="font-size:.72rem;color:var(--mu)">Messages containing these words are censored and logged as violations</div>
+      </div>
+      <span class="pill pill-y">${(w.builtinBad||[]).length} built-in · ${(w.customBad||[]).length} custom</span>
+    </div>
+
+    <!-- Add custom bad word -->
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <input class="inp" id="newBadWord" placeholder="Add a bad word…" style="flex:1;max-width:280px"
+        onkeydown="if(event.key==='Enter')addWord('bad')"/>
+      <button class="btn r" onclick="addWord('bad')" style="padding:8px 14px">+ Add</button>
+    </div>
+
+    <!-- Custom words (removable) -->
+    ${(w.customBad||[]).length ? `
+    <div style="margin-bottom:14px">
+      <div style="font-size:.7rem;color:var(--mu);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Custom words (click × to remove)</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${(w.customBad||[]).map(wd=>`
+          <span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(255,179,71,.1);border:1px solid rgba(255,179,71,.25);border-radius:100px;font-size:.78rem;color:var(--ylw)">
+            ${e(wd)}
+            <button onclick="removeWord('bad','${e(wd)}')" style="background:none;border:none;color:var(--ylw);cursor:pointer;font-size:.85rem;opacity:.7;padding:0;line-height:1">×</button>
+          </span>`).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Built-in words (read-only, collapsible) -->
+    <details style="margin-top:8px">
+      <summary style="font-size:.72rem;color:var(--mu);cursor:pointer;user-select:none">View ${(w.builtinBad||[]).length} built-in words (read-only)</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:10px;max-height:120px;overflow-y:auto">
+        ${(w.builtinBad||[]).map(wd=>`<span style="padding:2px 8px;background:var(--s2);border:1px solid var(--bd);border-radius:100px;font-size:.68rem;color:var(--mu)">${e(wd)}</span>`).join('')}
+      </div>
+    </details>
+  </div>
+
+  <!-- NUDITY WORDS -->
+  <div style="background:var(--s1);border:1px solid var(--bd);border-radius:13px;padding:18px;margin-bottom:18px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+      <div>
+        <div style="font-size:.85rem;font-weight:600;color:var(--red);margin-bottom:3px">🔞 Nudity Keywords (Image Filename Filter)</div>
+        <div style="font-size:.72rem;color:var(--mu)">Images with filenames containing these words are blocked and logged as nudity violations</div>
+      </div>
+      <span class="pill pill-r">${(w.builtinNudity||[]).length} built-in · ${(w.customNudity||[]).length} custom</span>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">
+      <input class="inp" id="newNudityWord" placeholder="Add a nudity keyword…" style="flex:1;max-width:280px"
+        onkeydown="if(event.key==='Enter')addWord('nudity')"/>
+      <button class="btn r" onclick="addWord('nudity')" style="padding:8px 14px">+ Add</button>
+    </div>
+
+    ${(w.customNudity||[]).length ? `
+    <div style="margin-bottom:14px">
+      <div style="font-size:.7rem;color:var(--mu);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em">Custom keywords (click × to remove)</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${(w.customNudity||[]).map(wd=>`
+          <span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.25);border-radius:100px;font-size:.78rem;color:var(--red)">
+            ${e(wd)}
+            <button onclick="removeWord('nudity','${e(wd)}')" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:.85rem;opacity:.7;padding:0;line-height:1">×</button>
+          </span>`).join('')}
+      </div>
+    </div>` : ''}
+
+    <details style="margin-top:8px">
+      <summary style="font-size:.72rem;color:var(--mu);cursor:pointer;user-select:none">View ${(w.builtinNudity||[]).length} built-in keywords (read-only)</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:10px">
+        ${(w.builtinNudity||[]).map(wd=>`<span style="padding:2px 8px;background:var(--s2);border:1px solid var(--bd);border-radius:100px;font-size:.68rem;color:var(--mu)">${e(wd)}</span>`).join('')}
+      </div>
+    </details>
+  </div>
+
+  <p style="font-size:.73rem;color:var(--mu)">⚡ Changes take effect immediately for all new messages. Custom words are saved in stats.json and survive restarts. Connected users also reload custom words when they send their next message.</p>
+  `;
+}
+
+function wordlist() { return words(); } // alias
+
+
 // ── IP BANS ───────────────────────────────────────────
 function ipbans() {
   return `
@@ -582,6 +674,44 @@ async function sendBC() {
   const r = await api('POST','/admin/api/broadcast',{message:msg});
   toast(`Sent to ${r?.sent||0} users`,'ok'); G('bcMsg').value='';
 }
+async function addWord(type) {
+  const inp = G(type==='bad'?'newBadWord':'newNudityWord');
+  const word = inp?.value.trim().toLowerCase();
+  if (!word) { toast('Enter a word','err'); return; }
+  const r = await api('POST', `/admin/api/words/${type}`, {word});
+  if (r?.ok) { toast(`"${word}" added`,'ok'); inp.value=''; await loadAll(); }
+  else toast('Failed','err');
+}
+async function removeWord(type, word) {
+  const r = await api('DELETE', `/admin/api/words/${type}/${encodeURIComponent(word)}`);
+  if (r?.ok) { toast(`"${word}" removed`,'ok'); await loadAll(); }
+  else toast('Failed','err');
+}
+
+async function addWord(type) {
+  const id = type==='bad' ? 'newBadWord' : 'newNudityWord';
+  const word = G(id)?.value.trim().toLowerCase();
+  if (!word) { toast('Enter a word first','err'); return; }
+  const r = await api('POST', `/admin/api/words/${type}`, { word });
+  if (!r) return;
+  if (!D.words) D.words = { builtinBad:[], customBad:[], builtinNudity:[], customNudity:[] };
+  if (type==='bad') D.words.customBad = r.customBad||[];
+  else D.words.customNudity = r.customNudity||[];
+  toast(`"${word}" added to ${type==='bad'?'bad words':'nudity keywords'}`,'ok');
+  G(id).value='';
+  render();
+}
+
+async function removeWord(type, word) {
+  const r = await api('DELETE', `/admin/api/words/${type}/${encodeURIComponent(word)}`);
+  if (!r) return;
+  if (!D.words) D.words = { builtinBad:[], customBad:[], builtinNudity:[], customNudity:[] };
+  if (type==='bad') D.words.customBad = r.customBad||[];
+  else D.words.customNudity = r.customNudity||[];
+  toast(`"${word}" removed`,'ok');
+  render();
+}
+
 async function clearViol(type) {
   if(!confirm(`Clear all ${type} violation records?`)) return;
   // Clear just this type from front-end; server clears all (filter client-side)
