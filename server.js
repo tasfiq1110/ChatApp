@@ -222,14 +222,16 @@ const adminTokens  = new Set();
 const STATS_FILE = path.join(__dirname, 'stats.json');
 function loadStats() {
   try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch {}
-  return { totalChats:0, totalMessages:0, totalUsers:0, dailyStats:{}, bannedSessions:[], bannedIPs:[], violations:[] };
+  return { totalChats:0, totalMessages:0, totalUsers:0, dailyStats:{}, bannedSessions:[], bannedIPs:[], violations:[], customBadWords:[], customNudityWords:[] };
 }
 function saveStats() { try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats,null,2)); } catch {} }
 let stats = loadStats();
+if (!stats.violations)       stats.violations = [];
+if (!stats.customBadWords)   stats.customBadWords = [];
+if (!stats.customNudityWords) stats.customNudityWords = [];
 
 const bannedSessions = new Set(stats.bannedSessions || []);
 const bannedIPs      = new Set(stats.bannedIPs || []);
-if (!stats.violations) stats.violations = [];
 
 // Violation logger
 function logViolation(type, sess, ip, content, filename, url) {
@@ -374,6 +376,57 @@ app.post('/admin/api/unban-ip', adminAuth, express.json(), (req,res)=>{
   res.json({ok:true});
 });
 
+// ─── Word list management ──────────────────────────────
+// Get all words (built-in + custom)
+app.get('/admin/api/words', adminAuth, (req,res)=>{
+  res.json({
+    builtinBad:    BAD_BUILTIN,
+    customBad:     stats.customBadWords || [],
+    builtinNudity: NUDITY_BUILTIN,
+    customNudity:  stats.customNudityWords || []
+  });
+});
+
+// Add a custom bad word
+app.post('/admin/api/words/bad', adminAuth, express.json(), (req,res)=>{
+  const w = (req.body.word||'').trim().toLowerCase();
+  if (!w) return res.status(400).json({error:'No word'});
+  if (!stats.customBadWords.includes(w)) { stats.customBadWords.push(w); saveStats(); }
+  res.json({ok:true, customBad: stats.customBadWords});
+});
+
+// Remove a custom bad word
+app.delete('/admin/api/words/bad/:word', adminAuth, (req,res)=>{
+  const w = req.params.word.toLowerCase();
+  stats.customBadWords = stats.customBadWords.filter(x=>x!==w); saveStats();
+  res.json({ok:true, customBad: stats.customBadWords});
+});
+
+// Add a custom nudity keyword
+app.post('/admin/api/words/nudity', adminAuth, express.json(), (req,res)=>{
+  const w = (req.body.word||'').trim().toLowerCase();
+  if (!w) return res.status(400).json({error:'No word'});
+  if (!stats.customNudityWords.includes(w)) { stats.customNudityWords.push(w); saveStats(); }
+  res.json({ok:true, customNudity: stats.customNudityWords});
+});
+
+// Remove a custom nudity keyword
+app.delete('/admin/api/words/nudity/:word', adminAuth, (req,res)=>{
+  const w = req.params.word.toLowerCase();
+  stats.customNudityWords = stats.customNudityWords.filter(x=>x!==w); saveStats();
+  res.json({ok:true, customNudity: stats.customNudityWords});
+});
+
+// Public endpoint — client fetches nudity keywords on load
+app.get('/api/nudity-words', (req,res)=>{
+  res.json([...NUDITY_BUILTIN, ...(stats.customNudityWords||[])]);
+});
+
+// Public endpoint — client fetches ALL custom words (no auth needed, no built-ins exposed)
+app.get('/admin/api/words/public', (req,res)=>{
+  res.json({ customBad: stats.customBadWords||[], customNudity: stats.customNudityWords||[] });
+});
+
 // ─── Violations log ────────────────────────────────────
 app.get('/admin/api/violations', adminAuth, (req,res)=>{
   const type=req.query.type;
@@ -419,9 +472,27 @@ app.get('/admin/api/daily', adminAuth, (req,res)=>res.json(stats.dailyStats));
 setInterval(()=>{ stats.dailyStats[todayKey()]={...(stats.dailyStats[todayKey()]||{}),users:dailyUsers.size}; saveStats(); }, 5*60*1000);
 
 // ─── Profanity ──────────────────────────────────────────
-const BAD = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
-const hasBad = t => { const n=t.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s'); return BAD.some(w=>n.includes(w)); };
-const censor  = t => { let r=t; BAD.forEach(w=>{const re=new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');r=r.replace(re,m=>m[0]+'*'.repeat(Math.max(m.length-2,1))+(m.length>1?m[m.length-1]:''));}); return r; };
+const BAD_BUILTIN = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
+
+// Built-in nudity filename keywords (client-side scan)
+const NUDITY_BUILTIN = ['nude','naked','nsfw','porn','sex','xxx','adult','boob','dick','onlyfans','lewd'];
+
+// Returns full merged word list (built-in + admin custom words)
+function getBadWords()    { return [...BAD_BUILTIN,    ...(stats.customBadWords   || [])]; }
+function getNudityWords() { return [...NUDITY_BUILTIN, ...(stats.customNudityWords || [])]; }
+
+function hasBad(t) {
+  const n = t.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s');
+  return getBadWords().some(w => n.includes(w.toLowerCase()));
+}
+function censor(t) {
+  let r = t;
+  getBadWords().forEach(w => {
+    const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi');
+    r = r.replace(re, m => m[0]+'*'.repeat(Math.max(m.length-2,1))+(m.length>1?m[m.length-1]:''));
+  });
+  return r;
+}
 
 // ─── Socket.IO ──────────────────────────────────────────
 io.on('connection', socket => {
@@ -608,7 +679,12 @@ io.on('connection', socket => {
     if (!s?.messages || !newText?.trim() || !s.roomId) return;
     const m = s.messages.find(m => m.id === msgId && m.sessId === s.sessId && m.type === 'text' && !m.unsent);
     if (!m) return;
-    if (hasBad(newText)) { s.warnings++; socket.emit('content_warning', { warns: s.warnings, max: 3 }); return; }
+    if (hasBad(newText)) {
+      s.warnings++;
+      logViolation('badword', s, s.ip, newText, null, null);
+      socket.emit('content_warning', { warns: s.warnings, max: 3 });
+      return;
+    }
     m.text = newText; m.edited = true;
     io.to(s.roomId).emit('message_edited', { msgId, newText });
   });
