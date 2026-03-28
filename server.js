@@ -56,6 +56,15 @@ app.use(express.json());
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Public stats — no auth needed, used by landing page
+app.get('/api/stats', (req, res) => {
+  const today = new Date().toISOString().slice(0,10);
+  res.json({
+    online: [...sessions.values()].filter(s => s.sockId).length,
+    chatsToday: stats.dailyStats?.[today]?.chats || 0
+  });
+});
+
 app.get('/api/country', async (req, res) => {
   try {
     const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:', '');
@@ -77,9 +86,22 @@ app.post('/upload', upload.single('file'), (req, res) => {
 // Client reports a blocked nudity attempt — file was already uploaded then flagged
 app.post('/report-nudity', express.json(), (req, res) => {
   const { filename, url, sessId } = req.body;
-  const sess = sessId ? [...sessions.values()].find(s => s.sessId === sessId) : null;
-  const ip   = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:','');
+  const sess = sessId ? sessions.get(sessId) : null;
+  // Use the IP stored on the session (captured at socket connect time via x-forwarded-for)
+  // Fall back to the HTTP request IP only if session not found
+  const ip = sess?.ip || (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:','');
   logViolation('nudity', sess, ip, filename, filename, url);
+  // Also increment warnings so repeated nudity uploads count toward ban
+  if (sess) {
+    sess.warnings = (sess.warnings || 0) + 1;
+    if (sess.warnings >= 3) {
+      bannedSessions.add(sessId);
+      stats.bannedSessions = [...bannedSessions]; saveStats();
+      const sock = getSock(sessId);
+      if (sock) { sock.emit('banned'); setTimeout(() => sock.disconnect(), 500); }
+      if (sess.partnerId) { emitTo(sess.partnerId, 'partner_left'); breakPair(sessId); }
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -434,7 +456,10 @@ app.get('/admin/api/violations', adminAuth, (req,res)=>{
 });
 
 app.delete('/admin/api/violations', adminAuth, (req,res)=>{
-  stats.violations=[]; saveStats(); res.json({ok:true});
+  const type = req.query.type;
+  if (type) { stats.violations = stats.violations.filter(v => v.type !== type); }
+  else { stats.violations = []; }
+  saveStats(); res.json({ok:true, remaining: stats.violations.length});
 });
 
 // ─── Media routes ──────────────────────────────────────
@@ -683,6 +708,7 @@ io.on('connection', socket => {
       s.warnings++;
       logViolation('badword', s, s.ip, newText, null, null);
       socket.emit('content_warning', { warns: s.warnings, max: 3 });
+      if (s.warnings >= 3) { socket.emit('banned'); setTimeout(() => socket.disconnect(), 500); return; }
       return;
     }
     m.text = newText; m.edited = true;
