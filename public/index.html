@@ -79,21 +79,21 @@ body{
 #chat{padding:0;overflow:hidden;justify-content:flex-start;}
 .chat-header{
   display:flex;align-items:center;
-  padding:10px 12px;padding-top:max(10px,env(safe-area-inset-top));
+  padding:8px 10px;padding-top:max(8px,env(safe-area-inset-top));
   background:rgba(18,18,26,.97);backdrop-filter:blur(20px);
-  border-bottom:1px solid var(--border);gap:10px;flex-shrink:0;z-index:10;min-height:58px;
+  border-bottom:1px solid var(--border);gap:8px;flex-shrink:0;z-index:10;min-height:52px;max-height:62px;
 }
-.partner-avatar{width:38px;height:38px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0;position:relative;}
-.online-dot{position:absolute;bottom:1px;right:1px;width:9px;height:9px;border-radius:50%;background:var(--success);border:2px solid var(--bg);}
-.partner-info{flex:1;min-width:0;}
-.partner-name{font-family:'Syne',sans-serif;font-weight:700;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px;}
-.partner-flag{font-size:.95rem;flex-shrink:0;}
-.partner-status{font-size:.68rem;color:var(--muted);height:14px;}
+.partner-avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;position:relative;}
+.online-dot{position:absolute;bottom:1px;right:1px;width:8px;height:8px;border-radius:50%;background:var(--success);border:2px solid var(--bg);}
+.partner-info{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:1px;}
+.partner-name{font-family:'Syne',sans-serif;font-weight:700;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px;line-height:1.2;}
+.partner-flag{font-size:.9rem;flex-shrink:0;}
+.partner-status{font-size:.65rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;}
 .partner-status.typing{color:var(--accent3);}
-.my-name-in-header{font-size:.65rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.my-name-in-header{font-size:.62rem;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.2;}
 .my-name-in-header strong{color:var(--accent3);font-family:'Syne',sans-serif;}
-.header-actions{display:flex;gap:5px;flex-shrink:0;}
-.hbtn{width:34px;height:34px;border-radius:50%;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.9rem;-webkit-tap-highlight-color:transparent;}
+.header-actions{display:flex;gap:4px;flex-shrink:0;}
+.hbtn{width:32px;height:32px;border-radius:50%;border:1px solid var(--border);background:transparent;color:var(--text);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:.85rem;-webkit-tap-highlight-color:transparent;}
 .hbtn:active{background:var(--surface2);}
 
 /* Messages */
@@ -116,7 +116,7 @@ body{
 .blocked-msg{font-style:italic;opacity:.5;font-size:.8rem;}
 
 /* INPUT */
-.input-area{padding:8px 10px;padding-bottom:max(10px,env(safe-area-inset-bottom));background:rgba(10,10,15,.97);backdrop-filter:blur(20px);border-top:1px solid var(--border);flex-shrink:0;}
+.input-area{padding:6px 8px;padding-bottom:max(8px,env(safe-area-inset-bottom));background:rgba(10,10,15,.97);backdrop-filter:blur(20px);border-top:1px solid var(--border);flex-shrink:0;}
 .panel{display:none;animation:slideUp .2s ease;margin-bottom:8px;}
 .panel.open{display:block;}
 @keyframes slideUp{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
@@ -244,7 +244,7 @@ body{
       <div class="input-row">
         <div class="input-tools">
           <button class="tool-btn" id="emojiToggle" onclick="togglePanel('emoji')">😊</button>
-          <button class="tool-btn" id="gifToggle" onclick="togglePanel('gif')">🎞️</button>
+          <button class="tool-btn" id="gifToggle" onclick="togglePanel('gif')" style="font-size:.65rem;font-weight:700;letter-spacing:-.5px;font-family:'Syne',sans-serif;color:var(--accent2);">GIF</button>
           <label class="tool-btn" style="cursor:pointer;">📎<input type="file" id="fileInput" accept="image/*,video/*" style="display:none;" onchange="handleFileSelect(event)"/></label>
         </div>
         <div class="msg-input-wrap">
@@ -326,28 +326,45 @@ let myCountry = {flag:'',name:''};
 let partnerCountry = {flag:'',name:''};
 
 function codeToFlag(code) {
-  if (!code || code.length !== 2) return '🌍';
-  return [...code.toUpperCase()].map(c => String.fromCodePoint(0x1F1E6 - 65 + c.charCodeAt(0))).join('');
+  if (!code || code.length !== 2) return '';
+  try {
+    return code.toUpperCase().split('').map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join('');
+  } catch(e) { return ''; }
 }
 
 async function detectCountry() {
+  // Try server-side IP detection first
   try {
     const r = await fetch('/api/country');
     const d = await r.json();
-    myCountry = {flag: d.flag || codeToFlag(d.code), name: d.country || '', code: d.code};
-    document.getElementById('myFlag').textContent = myCountry.flag;
-    if (socket.connected) socket.emit('set_country', myCountry);
-  } catch(e) {
-    try {
-      const r2 = await fetch('https://ipapi.co/json/');
-      const d2 = await r2.json();
+    if (d.code && d.code !== 'XX') {
+      myCountry = {flag: codeToFlag(d.code), name: d.country || '', code: d.code};
+      document.getElementById('myFlag').textContent = myCountry.flag;
+      if (socket.connected) socket.emit('set_country', myCountry);
+      return;
+    }
+  } catch(e) {}
+  // Fallback 1: ipapi.co
+  try {
+    const r2 = await fetch('https://ipapi.co/json/');
+    const d2 = await r2.json();
+    if (d2.country_code) {
       myCountry = {flag: codeToFlag(d2.country_code), name: d2.country_name || '', code: d2.country_code};
       document.getElementById('myFlag').textContent = myCountry.flag;
       if (socket.connected) socket.emit('set_country', myCountry);
-    } catch(e2) {
-      myCountry = {flag:'🌍', name:'Unknown'};
+      return;
     }
-  }
+  } catch(e2) {}
+  // Fallback 2: ip-api.com (no key needed)
+  try {
+    const r3 = await fetch('http://ip-api.com/json/?fields=country,countryCode');
+    const d3 = await r3.json();
+    if (d3.countryCode) {
+      myCountry = {flag: codeToFlag(d3.countryCode), name: d3.country || '', code: d3.countryCode};
+      document.getElementById('myFlag').textContent = myCountry.flag;
+      if (socket.connected) socket.emit('set_country', myCountry);
+    }
+  } catch(e3) {}
 }
 
 // =================== SOCKET ===================
