@@ -461,7 +461,24 @@ async function searchGifs(q){
   catch{g.innerHTML='<div style="color:var(--mu);font-size:.8rem;grid-column:1/-1;text-align:center;padding:14px 0">Could not load.</div>';}
 }
 // ═══ FILE UPLOAD ══════════════════════════════════════
-async function pickFile(e){const f=e.target.files[0];if(!f)return;e.target.value='';if(f.type.startsWith('image/')){toast('🔍 Scanning…');if(!(await scanOk(f))){G('imgMo').classList.add('on');toast('🚫 Blocked','warn');return;}}await uploadSend(f);}
+async function pickFile(e){
+  const f=e.target.files[0];if(!f)return;e.target.value='';
+  if(f.type.startsWith('image/')){
+    toast('🔍 Scanning…');
+    if(!(await scanOk(f))){
+      // Upload first so admin can see it, then report as nudity violation
+      const fd=new FormData();fd.append('file',f);
+      try{
+        const r=await fetch('/upload',{method:'POST',body:fd});
+        const d=await r.json();
+        if(d.url) fetch('/report-nudity',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({filename:d.filename,url:d.url,sessId:mySessId})});
+      }catch{}
+      G('imgMo').classList.add('on');toast('🚫 Blocked','warn');return;
+    }
+  }
+  await uploadSend(f);
+}
 async function scanOk(file){const name=file.name.toLowerCase();if(['nude','naked','nsfw','porn','sex','xxx','adult','boob','dick','onlyfans','lewd'].some(w=>name.includes(w)))return false;return new Promise(res=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{try{const c=document.createElement('canvas');c.width=c.height=80;const ctx=c.getContext('2d');ctx.drawImage(img,0,0,80,80);const data=ctx.getImageData(0,0,80,80).data;let skin=0;for(let i=0;i<data.length;i+=4){const r=data[i],g=data[i+1],b=data[i+2],a=data[i+3];if(a<128)continue;if((r>200&&g>150&&b>120&&r>g&&g>b)||(r>150&&g>90&&b>60&&r>g&&r>b&&r-b>30&&Math.abs(r-g)<80)||(r>90&&g>50&&b>30&&r>g&&r>b&&r-b>20&&r<200))skin++;}URL.revokeObjectURL(url);res(skin/6400<0.42);}catch{URL.revokeObjectURL(url);res(true);}};img.onerror=()=>{URL.revokeObjectURL(url);res(true);};img.src=url;});}
 async function uploadSend(file){const bar=G('upbar');bar.style.width='0%';bar.classList.add('on');const fd=new FormData();fd.append('file',file);return new Promise(res=>{const xhr=new XMLHttpRequest();xhr.upload.onprogress=e=>{if(e.lengthComputable)bar.style.width=(e.loaded/e.total*100)+'%';};xhr.onload=()=>{bar.classList.remove('on');if(xhr.status===200){const d=JSON.parse(xhr.responseText);socket.emit('send_message',{type:file.type.startsWith('video/')?'video':'image',url:d.url,filename:d.filename,mimetype:d.mimetype,replyTo:replyData});cancelReply();tone(1100,.07,.08);}else toast('Upload failed.');res();};xhr.onerror=()=>{bar.classList.remove('on');toast('Upload failed.');res();};xhr.open('POST','/upload');xhr.send(fd);});}
 // ═══ LIGHTBOX ═════════════════════════════════════════
