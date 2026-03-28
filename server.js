@@ -9,9 +9,21 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' },
-  maxHttpBufferSize: 50 * 1024 * 1024
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  maxHttpBufferSize: 50 * 1024 * 1024,
+  transports: ['websocket', 'polling'],
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
+
+// Keep-alive: prevent Render free tier from sleeping
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
+if (RENDER_URL) {
+  setInterval(() => {
+    fetch(RENDER_URL).catch(() => {});
+  }, 14 * 60 * 1000); // ping every 14 minutes
+}
 
 // In-memory stores (no persistent DB)
 const waitingQueue = [];
