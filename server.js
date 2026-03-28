@@ -182,12 +182,6 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('reaction_updated', { msgId, reactions:msg.reactions });
   });
 
-  // Notify partner when user takes a screenshot
-  socket.on('screenshot_taken', () => {
-    const p = activePairs.get(socket.id);
-    if (p) io.to(p).emit('partner_screenshot');
-  });
-
   socket.on('skip', () => {
     const p=disconnectPair(socket.id); if(p) io.to(p).emit('partner_left');
     const wi=waitingQueue.indexOf(socket.id); if(wi>-1) waitingQueue.splice(wi,1);
