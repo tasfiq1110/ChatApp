@@ -333,21 +333,49 @@ async function detectCountry(){
 }
 // TRANSLATE
 async function translateText(text){
-  try{const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text.slice(0,500))}&langpair=|en`,{signal:AbortSignal.timeout(6000)});const d=await r.json();if(d.responseStatus===200&&d.responseData?.translatedText){const t=d.responseData.translatedText;if(t.trim().toLowerCase()!==text.trim().toLowerCase()&&!t.includes('INVALID'))return t;}}catch{}
-  try{const r=await fetch(`https://lingva.ml/api/v1/auto/en/${encodeURIComponent(text.slice(0,500))}`,{signal:AbortSignal.timeout(6000)});const d=await r.json();if(d.translation)return d.translation;}catch{}
+  const clean=text.slice(0,500).trim();
+  // API 1: Google Translate unofficial (most reliable, no key needed)
+  try{
+    const url='https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q='+encodeURIComponent(clean);
+    const r=await fetch(url,{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    if(Array.isArray(d)&&Array.isArray(d[0])){
+      const t=d[0].map(x=>(x&&x[0])||'').join('').trim();
+      if(t&&t.toLowerCase()!==clean.toLowerCase())return t;
+    }
+  }catch{}
+  // API 2: MyMemory — works for non-English sources
+  try{
+    const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(clean)}&langpair=autodetect|en`,{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    if(d.responseStatus===200&&d.responseData?.translatedText){
+      const t=d.responseData.translatedText.trim();
+      if(t&&t.toLowerCase()!==clean.toLowerCase()&&!t.toUpperCase().includes('INVALID')&&!t.toUpperCase().includes('MYMEMORY WARNING'))return t;
+    }
+  }catch{}
+  // API 3: MyMemory with explicit auto|en
+  try{
+    const r=await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(clean)}&langpair=auto|en`,{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    if(d.responseStatus===200&&d.responseData?.translatedText){
+      const t=d.responseData.translatedText.trim();
+      if(t&&t.toLowerCase()!==clean.toLowerCase()&&!t.toUpperCase().includes('INVALID'))return t;
+    }
+  }catch{}
   return null;
 }
-async function doTranslate(btn,text){
+async function doTranslate(btn){
+  const text=btn.dataset.text;if(!text)return;
   btn.textContent='…';btn.disabled=true;
   const t=await translateText(text);
-  if(t){const bub=btn.closest('.bub');let el=bub?.querySelector('.tl-txt');if(!el){el=document.createElement('div');el.className='tl-txt';bub.appendChild(el);}el.textContent='🌐 '+t;btn.textContent='Hide';btn.disabled=false;btn.onclick=()=>{el.remove();btn.textContent='Translate';btn.onclick=()=>doTranslate(btn,text);};}
+  if(t){const bub=btn.closest('.bub');let el=bub?.querySelector('.tl-txt');if(!el){el=document.createElement('div');el.className='tl-txt';bub.appendChild(el);}el.textContent='🌐 '+t;btn.textContent='Hide';btn.disabled=false;btn.onclick=()=>{el.remove();btn.textContent='Translate';btn.onclick=()=>doTranslate(btn);};}
   else{btn.textContent='Failed';btn.disabled=false;}
 }
 // ═══ SOCKET ═══════════════════════════════════════════
 const socket=io({transports:['websocket','polling'],reconnection:true,reconnectionAttempts:Infinity,reconnectionDelay:1000,reconnectionDelayMax:8000,timeout:30000});
 let myN='',pN='',mySessId=null;
 let typTmr=null,typing=false,aPanel=null;
-let totalChats=Math.floor(Math.random()*5000+1000),paired=false,cdInt=null;
+let paired=false,cdInt=null;
 let storedSessId=localStorage.getItem('zapp_sid')||null;
 
 // Send everything in ONE init event — no race conditions
@@ -359,7 +387,16 @@ socket.on('disconnect',()=>{paired=false;if(G('chat').classList.contains('active
 socket.on('init_ok',({sessId,name})=>{
   mySessId=sessId;storedSessId=sessId;localStorage.setItem('zapp_sid',sessId);
   myN=name;G('myName').textContent=name;G('startBtn').disabled=false;G('startBtn').textContent='Start Chatting ⚡';
-  G('onlineN').textContent=Math.floor(Math.random()*300+50);G('chatN').textContent=(totalChats++).toLocaleString();
+  fetchPublicStats();
+  // Re-send in case detectCountry finished after connect
+  socket.emit('set_country',myCtry);socket.emit('set_interests',selInt);
+});
+async function fetchPublicStats(){
+  try{
+    const r=await fetch('/api/stats',{signal:AbortSignal.timeout(4000)});
+    if(r.ok){const d=await r.json();G('onlineN').textContent=(d.online||0).toLocaleString();G('chatN').textContent=(d.chatsToday||0).toLocaleString();}
+  }catch{G('onlineN').textContent='—';G('chatN').textContent='—';}
+}
   // Re-send in case detectCountry finished after connect
   socket.emit('set_country',myCtry);socket.emit('set_interests',selInt);
 });
@@ -412,6 +449,7 @@ socket.on('message_unsent',({msgId})=>{const r=document.querySelector(`[data-id=
 socket.on('message_edited',({msgId,newText})=>{const r=document.querySelector(`[data-id="${msgId}"]`);if(!r)return;const b=r.querySelector('.bub');if(!b||b.classList.contains('unsent'))return;const t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});const isMe=r.classList.contains('me');const rp=b.querySelector('.rp');b.innerHTML=(rp?rp.outerHTML:'')+esc(newText)+`<div class="tr"><span class="ed-tag">edited</span>${t}${isMe?'<span class="tick read">✓✓</span>':''}</div>`;});
 socket.on('reaction_updated',({msgId,reactions})=>{const r=document.querySelector(`[data-id="${msgId}"]`);if(r)renderReacts(r,reactions);});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&paired&&G('chat').classList.contains('active'))socket.emit('messages_read');});
+socket.on('admin_broadcast',({message})=>{toast('📢 '+message);sys('📢 Admin: '+message);sndWarn();});
 // ═══ UI ═══════════════════════════════════════════════
 function showScreen(id){document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));G(id).classList.add('active');if(id==='chat')setTimeout(()=>{const m=G('msgs');m.scrollTop=m.scrollHeight;},100);}
 function startChat(){
@@ -461,7 +499,7 @@ function renderMsg(msg,isMe){
   else if(msg.type==='gif'){bub.className='bub';bub.style.padding='4px';const img=document.createElement('img');img.src=msg.gif;img.style.cssText='max-width:200px;border-radius:10px;';img.loading='lazy';bub.innerHTML=rpHtml;bub.appendChild(img);}
   else if(msg.type==='image'){bub.className='bub';bub.style.padding='4px';const img=document.createElement('img');img.src=msg.url;img.loading='lazy';img.style.cssText='max-width:100%;border-radius:10px;cursor:pointer;';img.onclick=()=>openLb('img',msg.url);bub.innerHTML=rpHtml;bub.appendChild(img);}
   else if(msg.type==='video'){bub.className='bub';bub.style.padding='4px';const vid=document.createElement('video');vid.src=msg.url;vid.controls=true;vid.setAttribute('playsinline','');vid.style.cssText='max-height:200px;width:100%;border-radius:10px;';bub.innerHTML=rpHtml;bub.appendChild(vid);}
-  else{bub.className='bub';const tick=isMe?`<span class="tick ${msg.read?'read':'sent'}">✓✓</span>`:'';const tlBtn=!isMe&&msg.text?`<button class="tl-btn" onclick="doTranslate(this,'${esc(msg.text).replace(/'/g,'&#39;').replace(/"/g,'&quot;')}')">Translate</button>`:'';bub.innerHTML=rpHtml+esc(msg.text||'')+`<div class="tr">${tlBtn}${time}${tick}</div>`;}
+  else{bub.className='bub';const tick=isMe?`<span class="tick ${msg.read?'read':'sent'}">✓✓</span>`:'';const tlBtn=!isMe&&msg.text?'<button class="tl-btn" onclick="doTranslate(this)">Translate</button>':'';bub.innerHTML=rpHtml+esc(msg.text||'')+`<div class="tr">${tlBtn}${time}${tick}</div>`;if(!isMe&&msg.text){const tlb=bub.querySelector('.tl-btn');if(tlb)tlb.dataset.text=msg.text;}}
   let ptm;
   bub.addEventListener('contextmenu',e=>{e.preventDefault();openMenu(e,msg.id,isMe,msg.type);});
   bub.addEventListener('touchstart',e=>{ptm=setTimeout(()=>openMenu(e,msg.id,isMe,msg.type),500);},{passive:true});
