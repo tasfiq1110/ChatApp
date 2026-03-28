@@ -289,9 +289,26 @@ const sndMsg=()=>tone(880,.12);
 const sndConn=()=>{tone(660,.08);setTimeout(()=>tone(880,.12),100);};
 const sndWarn=()=>tone(300,.2,.15);
 // PROFANITY
-const BAD=[/\bf+u+c+k+/i,/\bs+h+i+t+\b/i,/\bb+i+t+c+h+\b/i,/\ba+s+s+h+o+l+e/i,/\bc+u+n+t\b/i,/\bd+i+c+k\b/i,/\bp+u+s+s+y\b/i,/\bc+o+c+k\b/i,/\bwhore\b/i,/\bslut\b/i,/\bnudes?\b/i,/\bnaked\b/i,/\bporn\b/i,/\bxxx\b/i,/\bn+i+g+g+[ae]+r?\b/i,/\bf+a+g+g+o+t\b/i,/\brapist?\b/i,/\b(maagi|madar|choda|khanki|harami|bokachoda|shala|gandu|randi|lavda|lauda|bhosdi|choot)\b/i,/\b(bhenchod|madarchod|chutiya|bhadwa|haramzada|behenchod)\b/i,/\b(puta|pendejo|cabron|maricon|verga|joder|mierda)\b/i,/\b(putain|merde|salope|connard)\b/i,/\b(kuss|kahba|sharmouta)\b/i,/\b(anjing|bangsat|kontol|memek|bajingan)\b/i,/\b(orospu|siktir|pezevenk)\b/i,/\b(putangina|tangina|gago)\b/i,/\b(blyad|pizda|khuy|mudak)\b/i,/\b(hurensohn|wichser)\b/i];
+// Bad words: built-in patterns + custom words fetched from server
+const BAD_REGEX=[/\bf+u+c+k+/i,/\bs+h+i+t+\b/i,/\bb+i+t+c+h+\b/i,/\ba+s+s+h+o+l+e/i,/\bc+u+n+t\b/i,/\bd+i+c+k\b/i,/\bp+u+s+s+y\b/i,/\bc+o+c+k\b/i,/\bwhore\b/i,/\bslut\b/i,/\bnudes?\b/i,/\bnaked\b/i,/\bporn\b/i,/\bxxx\b/i,/\bn+i+g+g+[ae]+r?\b/i,/\bf+a+g+g+o+t\b/i,/\brapist?\b/i,/\b(maagi|madar|choda|khanki|harami|bokachoda|shala|gandu|randi|lavda|lauda|bhosdi|choot)\b/i,/\b(bhenchod|madarchod|chutiya|bhadwa|haramzada|behenchod)\b/i,/\b(puta|pendejo|cabron|maricon|verga|joder|mierda)\b/i,/\b(putain|merde|salope|connard)\b/i,/\b(kuss|kahba|sharmouta)\b/i,/\b(anjing|bangsat|kontol|memek|bajingan)\b/i,/\b(orospu|siktir|pezevenk)\b/i,/\b(putangina|tangina|gago)\b/i,/\b(blyad|pizda|khuy|mudak)\b/i,/\b(hurensohn|wichser)\b/i];
+let customBadWords=[];  // loaded from server
+let customNudityWords=[]; // loaded from server
 let warns=0;
-function hasBad(t){const n=t.toLowerCase().replace(/4/g,'a').replace(/3/g,'e').replace(/1/g,'i').replace(/0/g,'o').replace(/5/g,'s').replace(/[@]/g,'a').replace(/\$/g,'s');return BAD.some(p=>p.test(n));}
+
+async function loadCustomWords(){
+  try{
+    const r=await fetch('/admin/api/words/public');
+    if(r.ok){const d=await r.json();customBadWords=d.customBad||[];customNudityWords=d.customNudity||[];}
+  }catch{}
+}
+
+function normalize(t){return t.toLowerCase().replace(/4/g,'a').replace(/3/g,'e').replace(/1/g,'i').replace(/0/g,'o').replace(/5/g,'s').replace(/[@]/g,'a').replace(/\$/g,'s');}
+function hasBad(t){
+  const n=normalize(t);
+  if(BAD_REGEX.some(p=>p.test(n))) return true;
+  if(customBadWords.some(w=>n.includes(w.toLowerCase()))) return true;
+  return false;
+}
 // INTERESTS
 const TAGS=['Gaming 🎮','Music 🎵','Movies 🎬','Anime 🌸','Sports ⚽','Tech 💻','Art 🎨','Travel ✈️','Food 🍕','Fitness 💪','Books 📚','Science 🔬','Fashion 👗','Memes 😂','Photography 📷'];
 let selInt=[];
@@ -496,7 +513,12 @@ async function pickFile(e){
   }
   await uploadSend(f);
 }
-async function scanOk(file){const name=file.name.toLowerCase();if(['nude','naked','nsfw','porn','sex','xxx','adult','boob','dick','onlyfans','lewd'].some(w=>name.includes(w)))return false;return new Promise(res=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{try{const c=document.createElement('canvas');c.width=c.height=80;const ctx=c.getContext('2d');ctx.drawImage(img,0,0,80,80);const data=ctx.getImageData(0,0,80,80).data;let skin=0;for(let i=0;i<data.length;i+=4){const r=data[i],g=data[i+1],b=data[i+2],a=data[i+3];if(a<128)continue;if((r>200&&g>150&&b>120&&r>g&&g>b)||(r>150&&g>90&&b>60&&r>g&&r>b&&r-b>30&&Math.abs(r-g)<80)||(r>90&&g>50&&b>30&&r>g&&r>b&&r-b>20&&r<200))skin++;}URL.revokeObjectURL(url);res(skin/6400<0.42);}catch{URL.revokeObjectURL(url);res(true);}};img.onerror=()=>{URL.revokeObjectURL(url);res(true);};img.src=url;});}
+async function scanOk(file){
+  const name=file.name.toLowerCase();
+  // Fetch nudity keywords from server (includes admin-added custom words)
+  let nudityWords=['nude','naked','nsfw','porn','sex','xxx','adult','boob','dick','onlyfans','lewd'];
+  try{const r=await fetch('/api/nudity-words');if(r.ok)nudityWords=await r.json();}catch{}
+  if(nudityWords.some(w=>name.includes(w)))return false;return new Promise(res=>{const img=new Image(),url=URL.createObjectURL(file);img.onload=()=>{try{const c=document.createElement('canvas');c.width=c.height=80;const ctx=c.getContext('2d');ctx.drawImage(img,0,0,80,80);const data=ctx.getImageData(0,0,80,80).data;let skin=0;for(let i=0;i<data.length;i+=4){const r=data[i],g=data[i+1],b=data[i+2],a=data[i+3];if(a<128)continue;if((r>200&&g>150&&b>120&&r>g&&g>b)||(r>150&&g>90&&b>60&&r>g&&r>b&&r-b>30&&Math.abs(r-g)<80)||(r>90&&g>50&&b>30&&r>g&&r>b&&r-b>20&&r<200))skin++;}URL.revokeObjectURL(url);res(skin/6400<0.42);}catch{URL.revokeObjectURL(url);res(true);}};img.onerror=()=>{URL.revokeObjectURL(url);res(true);};img.src=url;});}
 async function uploadSend(file){const bar=G('upbar');bar.style.width='0%';bar.classList.add('on');const fd=new FormData();fd.append('file',file);return new Promise(res=>{const xhr=new XMLHttpRequest();xhr.upload.onprogress=e=>{if(e.lengthComputable)bar.style.width=(e.loaded/e.total*100)+'%';};xhr.onload=()=>{bar.classList.remove('on');if(xhr.status===200){const d=JSON.parse(xhr.responseText);socket.emit('send_message',{type:file.type.startsWith('video/')?'video':'image',url:d.url,filename:d.filename,mimetype:d.mimetype,replyTo:replyData});cancelReply();tone(1100,.07,.08);}else toast('Upload failed.');res();};xhr.onerror=()=>{bar.classList.remove('on');toast('Upload failed.');res();};xhr.open('POST','/upload');xhr.send(fd);});}
 // ═══ LIGHTBOX ═════════════════════════════════════════
 function openLb(type,src){const c=G('lbC');if(type==='img'){const img=document.createElement('img');img.src=src;c.appendChild(img);}else{const v=document.createElement('video');v.src=src;v.controls=true;v.setAttribute('playsinline','');c.appendChild(v);}G('lb').classList.add('on');}
@@ -512,6 +534,7 @@ function fixVH(){G('app').style.height=window.innerHeight+'px';}
 window.addEventListener('resize',fixVH);fixVH();
 G('ti').addEventListener('focus',()=>setTimeout(()=>{const m=G('msgs');m.scrollTop=m.scrollHeight;},400));
 detectCountry();
+loadCustomWords();
 </script>
 </body>
 </html>
