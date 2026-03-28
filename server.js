@@ -187,6 +187,50 @@ io.on('connection', (socket) => {
   });
 
   socket.on('typing', (isTyping) => { const p = activePairs.get(socket.id); if (p) io.to(p).emit('partner_typing', isTyping); });
+
+  socket.on('unsend_message', ({ msgId }) => {
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
+    const msgs = chatMessages.get(roomId) || [];
+    const msg = msgs.find(m => m.id === msgId && m.from === socket.id);
+    if (!msg) return;
+    // Delete uploaded file if any
+    if (msg.filename) {
+      const fp = path.join(UPLOAD_DIR, msg.filename);
+      if (fs.existsSync(fp)) fs.unlink(fp, () => {});
+    }
+    msg.unsent = true; msg.text = ''; msg.url = null; msg.gif = null;
+    io.to(roomId).emit('message_unsent', { msgId });
+  });
+
+  socket.on('edit_message', ({ msgId, newText }) => {
+    const roomId = userRooms.get(socket.id);
+    if (!roomId || !newText?.trim()) return;
+    const msgs = chatMessages.get(roomId) || [];
+    const msg = msgs.find(m => m.id === msgId && m.from === socket.id && m.type === 'text' && !m.unsent);
+    if (!msg) return;
+    if (checkBadWords(newText)) { socket.emit('content_warning', { warns: (userWarnings.get(socket.id)||0)+1, max:3 }); return; }
+    msg.text = newText; msg.edited = true;
+    io.to(roomId).emit('message_edited', { msgId, newText, edited: true });
+  });
+
+  socket.on('add_reaction', ({ msgId, emoji }) => {
+    const roomId = userRooms.get(socket.id);
+    if (!roomId) return;
+    const msgs = chatMessages.get(roomId) || [];
+    const msg = msgs.find(m => m.id === msgId);
+    if (!msg) return;
+    if (!msg.reactions) msg.reactions = {};
+    // Toggle: if same user reacted with same emoji, remove it
+    const key = emoji;
+    if (!msg.reactions[key]) msg.reactions[key] = [];
+    const idx = msg.reactions[key].indexOf(socket.id);
+    if (idx > -1) msg.reactions[key].splice(idx, 1);
+    else msg.reactions[key].push(socket.id);
+    if (msg.reactions[key].length === 0) delete msg.reactions[key];
+    io.to(roomId).emit('reaction_updated', { msgId, reactions: msg.reactions });
+  });
+
   socket.on('skip', () => {
     const p = disconnectPair(socket.id); if (p) io.to(p).emit('partner_left');
     const wi = waitingQueue.indexOf(socket.id); if (wi > -1) waitingQueue.splice(wi, 1);
