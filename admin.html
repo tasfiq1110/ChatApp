@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Zapp Admin</title>
+<style>
+:root{
+  --bg:#0d0d14;--s1:#13131e;--s2:#1a1a2a;--s3:#22223a;
+  --bd:rgba(255,255,255,.08);--ac:#7c6aff;--ac2:#ff6a9f;--ac3:#6affda;
+  --tx:#f0eeff;--mu:rgba(240,238,255,.5);
+  --red:#ff4d6d;--grn:#6affda;--ylw:#ffb347;--blue:#4d9fff;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--tx);min-height:100vh;}
+a{color:var(--ac);text-decoration:none;}
+
+/* Login */
+#loginScreen{display:flex;align-items:center;justify-content:center;min-height:100vh;}
+.login-box{background:var(--s1);border:1px solid var(--bd);border-radius:20px;padding:40px;width:360px;text-align:center;}
+.login-box h1{font-size:1.6rem;margin-bottom:6px;background:linear-gradient(135deg,var(--ac),var(--ac2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.login-box p{color:var(--mu);font-size:.875rem;margin-bottom:28px;}
+.login-box input{width:100%;padding:12px 16px;background:var(--s2);border:1px solid var(--bd);border-radius:10px;color:var(--tx);font-size:.95rem;outline:none;margin-bottom:12px;}
+.login-box input:focus{border-color:var(--ac);}
+.login-box button{width:100%;padding:13px;background:linear-gradient(135deg,var(--ac),var(--ac2));border:none;border-radius:10px;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;}
+.login-box button:active{opacity:.85;}
+.login-err{color:var(--red);font-size:.82rem;margin-top:8px;}
+
+/* App layout */
+#adminApp{display:none;}
+.topbar{display:flex;align-items:center;padding:14px 24px;background:var(--s1);border-bottom:1px solid var(--bd);gap:16px;}
+.topbar h1{font-size:1.2rem;font-weight:700;flex:1;background:linear-gradient(135deg,var(--ac),var(--ac2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.topbar .badge{padding:4px 12px;border-radius:100px;background:rgba(106,255,218,.1);border:1px solid rgba(106,255,218,.2);color:var(--ac3);font-size:.75rem;}
+.refresh-btn,.logout-btn{padding:7px 16px;border-radius:8px;border:1px solid var(--bd);background:transparent;color:var(--mu);cursor:pointer;font-size:.82rem;}
+.refresh-btn:hover{border-color:var(--ac);color:var(--ac);}
+.logout-btn:hover{border-color:var(--red);color:var(--red);}
+
+.layout{display:flex;min-height:calc(100vh - 53px);}
+.sidebar{width:200px;background:var(--s1);border-right:1px solid var(--bd);padding:16px 0;flex-shrink:0;}
+.nav-item{display:flex;align-items:center;gap:10px;padding:11px 20px;cursor:pointer;font-size:.875rem;color:var(--mu);transition:all .15s;}
+.nav-item:hover{background:var(--s2);color:var(--tx);}
+.nav-item.active{background:rgba(124,106,255,.12);color:var(--ac);border-right:2px solid var(--ac);}
+.nav-icon{font-size:1.1rem;width:20px;text-align:center;}
+
+.content{flex:1;padding:24px;overflow-y:auto;}
+
+/* Stat cards */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:14px;margin-bottom:24px;}
+.card{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:18px 16px;}
+.card-label{font-size:.72rem;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;}
+.card-val{font-size:1.8rem;font-weight:700;font-variant-numeric:tabular-nums;}
+.card-val.green{color:var(--grn);}
+.card-val.blue{color:var(--blue);}
+.card-val.yellow{color:var(--ylw);}
+.card-val.red{color:var(--red);}
+.card-val.purple{color:var(--ac);}
+.card-sub{font-size:.72rem;color:var(--mu);margin-top:4px;}
+
+/* Section titles */
+.section-title{font-size:.82rem;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;}
+
+/* Table */
+.tbl-wrap{background:var(--s1);border:1px solid var(--bd);border-radius:14px;overflow:hidden;margin-bottom:24px;}
+table{width:100%;border-collapse:collapse;}
+th{text-align:left;padding:11px 14px;font-size:.72rem;font-weight:600;color:var(--mu);text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--bd);background:var(--s2);}
+td{padding:10px 14px;font-size:.83rem;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle;}
+tr:last-child td{border-bottom:none;}
+tr:hover td{background:var(--s2);}
+.badge-pill{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:100px;font-size:.7rem;font-weight:500;}
+.pill-green{background:rgba(106,255,218,.1);border:1px solid rgba(106,255,218,.2);color:var(--grn);}
+.pill-red{background:rgba(255,77,109,.1);border:1px solid rgba(255,77,109,.2);color:var(--red);}
+.pill-yellow{background:rgba(255,179,71,.1);border:1px solid rgba(255,179,71,.2);color:var(--ylw);}
+.pill-gray{background:rgba(255,255,255,.05);border:1px solid var(--bd);color:var(--mu);}
+.act-btn{padding:4px 10px;border-radius:6px;border:1px solid var(--bd);background:transparent;color:var(--mu);cursor:pointer;font-size:.72rem;}
+.act-btn:hover{border-color:var(--ac);color:var(--ac);}
+.act-btn.danger:hover{border-color:var(--red);color:var(--red);}
+.act-btn.warn:hover{border-color:var(--ylw);color:var(--ylw);}
+
+/* Media grid */
+.media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:24px;}
+.media-card{background:var(--s1);border:1px solid var(--bd);border-radius:12px;overflow:hidden;position:relative;}
+.media-card img,.media-card video{width:100%;height:110px;object-fit:cover;display:block;}
+.media-card .media-info{padding:8px 10px;}
+.media-card .media-name{font-size:.7rem;color:var(--mu);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.media-card .media-size{font-size:.68rem;color:var(--mu);opacity:.6;}
+.media-del{position:absolute;top:6px;right:6px;width:26px;height:26px;border-radius:50%;background:rgba(255,77,109,.9);border:none;color:#fff;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center;}
+.media-del:hover{background:var(--red);}
+.video-thumb{width:100%;height:110px;background:var(--s3);display:flex;align-items:center;justify-content:center;font-size:2rem;}
+
+/* Chart */
+.chart-wrap{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:20px;margin-bottom:24px;}
+.chart-bars{display:flex;align-items:flex-end;gap:4px;height:120px;margin-top:12px;}
+.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;}
+.bar{width:100%;background:linear-gradient(180deg,var(--ac),rgba(124,106,255,.3));border-radius:4px 4px 0 0;min-height:2px;transition:height .3s;}
+.bar-label{font-size:.6rem;color:var(--mu);white-space:nowrap;}
+
+/* Chat viewer */
+.chat-view{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:16px;max-height:500px;overflow-y:auto;}
+.cv-msg{margin-bottom:10px;padding:8px 12px;border-radius:10px;font-size:.83rem;}
+.cv-msg.me{background:rgba(124,106,255,.15);border:1px solid rgba(124,106,255,.2);margin-left:20%;}
+.cv-msg.them{background:var(--s2);border:1px solid var(--bd);margin-right:20%;}
+.cv-msg-name{font-size:.68rem;color:var(--mu);margin-bottom:3px;}
+.cv-msg-text{line-height:1.4;}
+.cv-msg-time{font-size:.62rem;color:var(--mu);margin-top:3px;text-align:right;}
+.cv-msg img{max-width:200px;border-radius:8px;margin-top:4px;}
+
+/* Broadcast */
+.broadcast-box{background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:20px;margin-bottom:24px;}
+.broadcast-box textarea{width:100%;padding:10px 14px;background:var(--s2);border:1px solid var(--bd);border-radius:8px;color:var(--tx);font-size:.875rem;resize:vertical;min-height:80px;outline:none;}
+.broadcast-box textarea:focus{border-color:var(--ac);}
+.broadcast-box button{margin-top:10px;padding:9px 22px;background:linear-gradient(135deg,var(--ac),var(--ac2));border:none;border-radius:8px;color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;}
+
+/* Search bar */
+.search-bar{padding:9px 14px;background:var(--s2);border:1px solid var(--bd);border-radius:10px;color:var(--tx);font-size:.875rem;outline:none;width:260px;margin-bottom:14px;}
+.search-bar:focus{border-color:var(--ac);}
+
+/* Empty state */
+.empty{text-align:center;padding:40px;color:var(--mu);font-size:.875rem;}
+
+/* Toast */
+.admin-toast{position:fixed;bottom:24px;right:24px;padding:10px 18px;background:var(--s2);border:1px solid var(--bd);border-radius:10px;font-size:.83rem;color:var(--tx);z-index:9999;opacity:0;transition:opacity .3s;pointer-events:none;}
+.admin-toast.show{opacity:1;}
+.admin-toast.ok{border-color:var(--grn);color:var(--grn);}
+.admin-toast.err{border-color:var(--red);color:var(--red);}
+
+@media(max-width:700px){
+  .sidebar{display:none;}
+  .cards{grid-template-columns:repeat(2,1fr);}
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="loginScreen">
+  <div class="login-box">
+    <h1>⚡ Zapp Admin</h1>
+    <p>Enter your admin password to continue</p>
+    <input type="password" id="pw" placeholder="Admin password" onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button onclick="doLogin()">Login →</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- ADMIN APP -->
+<div id="adminApp">
+  <div class="topbar">
+    <h1>⚡ Zapp Admin</h1>
+    <span class="badge" id="liveIndicator">● Live</span>
+    <button class="refresh-btn" onclick="loadAll()">↻ Refresh</button>
+    <button class="logout-btn" onclick="doLogout()">Logout</button>
+  </div>
+  <div class="layout">
+    <div class="sidebar">
+      <div class="nav-item active" onclick="showTab('overview')" id="nav-overview"><span class="nav-icon">📊</span>Overview</div>
+      <div class="nav-item" onclick="showTab('users')" id="nav-users"><span class="nav-icon">👥</span>Users</div>
+      <div class="nav-item" onclick="showTab('media')" id="nav-media"><span class="nav-icon">🖼️</span>Media</div>
+      <div class="nav-item" onclick="showTab('banned')" id="nav-banned"><span class="nav-icon">🚫</span>Banned</div>
+      <div class="nav-item" onclick="showTab('broadcast')" id="nav-broadcast"><span class="nav-icon">📢</span>Broadcast</div>
+      <div class="nav-item" onclick="showTab('analytics')" id="nav-analytics"><span class="nav-icon">📈</span>Analytics</div>
+    </div>
+    <div class="content" id="content"></div>
+  </div>
+</div>
+
+<div class="admin-toast" id="adminToast"></div>
+
+<script>
+let TOKEN = localStorage.getItem('zapp_admin_token') || '';
+let currentTab = 'overview';
+let autoRefreshInterval = null;
+let allSessions = [], allMedia = [], statsData = {};
+
+// ── Auth ─────────────────────────────────────────────────
+async function doLogin(){
+  const pw = document.getElementById('pw').value;
+  try{
+    const r = await fetch('/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pw})});
+    const d = await r.json();
+    if(d.token){
+      TOKEN = d.token; localStorage.setItem('zapp_admin_token', TOKEN);
+      document.getElementById('loginScreen').style.display = 'none';
+      document.getElementById('adminApp').style.display = 'block';
+      loadAll();
+      autoRefreshInterval = setInterval(loadAll, 30000); // auto-refresh every 30s
+    } else document.getElementById('loginErr').textContent = 'Wrong password';
+  }catch{ document.getElementById('loginErr').textContent = 'Connection failed'; }
+}
+
+function doLogout(){
+  TOKEN = ''; localStorage.removeItem('zapp_admin_token');
+  clearInterval(autoRefreshInterval);
+  document.getElementById('adminApp').style.display = 'none';
+  document.getElementById('loginScreen').style.display = 'flex';
+}
+
+// Auto-login if token saved
+if(TOKEN){
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('adminApp').style.display = 'block';
+  loadAll();
+  autoRefreshInterval = setInterval(loadAll, 30000);
+}
+
+async function api(method, path, body){
+  const r = await fetch(path, {
+    method, headers:{'x-admin-token':TOKEN,'Content-Type':'application/json'},
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if(r.status === 401){ doLogout(); return null; }
+  return r.json();
+}
+
+// ── Load all data ──────────────────────────────────────
+async function loadAll(){
+  try{
+    const [s, sess, media] = await Promise.all([
+      api('GET','/admin/api/stats'),
+      api('GET','/admin/api/sessions'),
+      api('GET','/admin/api/media')
+    ]);
+    if(!s) return;
+    statsData = s; allSessions = sess||[]; allMedia = media||[];
+    renderTab(currentTab);
+    document.getElementById('liveIndicator').textContent = `● ${s.online} online`;
+  }catch(e){ showToast('Refresh failed','err'); }
+}
+
+// ── Tabs ──────────────────────────────────────────────
+function showTab(tab){
+  currentTab = tab;
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('nav-'+tab)?.classList.add('active');
+  renderTab(tab);
+}
+
+function renderTab(tab){
+  const c = document.getElementById('content');
+  switch(tab){
+    case 'overview':   c.innerHTML = renderOverview(); break;
+    case 'users':      c.innerHTML = renderUsers(); break;
+    case 'media':      c.innerHTML = renderMedia(); break;
+    case 'banned':     c.innerHTML = renderBanned(); break;
+    case 'broadcast':  c.innerHTML = renderBroadcast(); break;
+    case 'analytics':  c.innerHTML = renderAnalytics(); break;
+  }
+}
+
+// ── Overview ──────────────────────────────────────────
+function renderOverview(){
+  const s = statsData;
+  return `
+  <div class="cards">
+    <div class="card"><div class="card-label">Online Now</div><div class="card-val green">${s.online||0}</div><div class="card-sub">Active connections</div></div>
+    <div class="card"><div class="card-label">Active Chats</div><div class="card-val blue">${s.activePairs||0}</div><div class="card-sub">Paired users</div></div>
+    <div class="card"><div class="card-label">Searching</div><div class="card-val yellow">${s.waiting||0}</div><div class="card-sub">In queue</div></div>
+    <div class="card"><div class="card-label">Today's Users</div><div class="card-val purple">${s.todayDAU||0}</div><div class="card-sub">Daily active</div></div>
+    <div class="card"><div class="card-label">Total Chats</div><div class="card-val blue">${(s.totalChats||0).toLocaleString()}</div><div class="card-sub">All time</div></div>
+    <div class="card"><div class="card-label">Total Messages</div><div class="card-val purple">${(s.totalMessages||0).toLocaleString()}</div><div class="card-sub">All time</div></div>
+    <div class="card"><div class="card-label">Total Users</div><div class="card-val blue">${(s.totalUsers||0).toLocaleString()}</div><div class="card-sub">All time</div></div>
+    <div class="card"><div class="card-label">Banned</div><div class="card-val red">${s.bannedCount||0}</div><div class="card-sub">Sessions</div></div>
+    <div class="card"><div class="card-label">Media Files</div><div class="card-val yellow">${(s.mediaFiles||[]).length}</div><div class="card-sub">${fmtBytes((s.mediaFiles||[]).reduce((a,f)=>a+f.size,0))}</div></div>
+    <div class="card"><div class="card-label">Sessions</div><div class="card-val gray">${s.totalSessions||0}</div><div class="card-sub">In memory</div></div>
+  </div>
+  <div class="section-title">Recent Media (latest 8)</div>
+  <div class="media-grid">${(s.mediaFiles||[]).slice(0,8).map(f=>{
+    const isImg=['.jpg','.jpeg','.png','.gif','.webp'].some(e=>f.filename.toLowerCase().endsWith(e));
+    return`<div class="media-card">
+      ${isImg?`<img src="/uploads/${f.filename}" loading="lazy">`:`<div class="video-thumb">🎬</div>`}
+      <div class="media-info"><div class="media-name">${f.filename}</div><div class="media-size">${fmtBytes(f.size)}</div></div>
+      <button class="media-del" onclick="deleteMedia('${f.filename}')">✕</button>
+    </div>`;
+  }).join('')||'<div class="empty">No media files</div>'}</div>
+  `;
+}
+
+// ── Users ─────────────────────────────────────────────
+function renderUsers(){
+  return `
+  <input class="search-bar" id="userSearch" placeholder="Search by name or country…" oninput="filterUsers()"/>
+  <div class="tbl-wrap" id="usersTbl">${usersTable(allSessions)}</div>`;
+}
+function usersTable(list){
+  if(!list.length) return '<div class="empty">No active sessions</div>';
+  return`<table>
+    <tr><th>Name</th><th>Country</th><th>Interests</th><th>Status</th><th>Warns</th><th>Messages</th><th>Actions</th></tr>
+    ${list.map(u=>`<tr>
+      <td>${u.flag||''} <strong>${esc(u.name)}</strong></td>
+      <td>${esc(u.country||'—')}</td>
+      <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(u.interests||[]).slice(0,3).join(', ')||'—'}</td>
+      <td>${u.inChat?`<span class="badge-pill pill-green">💬 Chatting</span>`:u.online?`<span class="badge-pill pill-yellow">🟡 Online</span>`:`<span class="badge-pill pill-gray">Offline</span>`}</td>
+      <td>${u.warnings>0?`<span style="color:var(--ylw)">${u.warnings}/3</span>`:'0'}</td>
+      <td>${u.msgCount}</td>
+      <td style="display:flex;gap:4px;flex-wrap:wrap">
+        ${u.inChat?`<button class="act-btn" onclick="viewChat('${u.sessId}')">👁 View</button>`:''}
+        <button class="act-btn warn" onclick="kickUser('${u.sessId}')">⚡ Kick</button>
+        <button class="act-btn danger" onclick="banUser('${u.sessId}','${esc(u.name)}')">🚫 Ban</button>
+      </td>
+    </tr>`).join('')}
+  </table>`;
+}
+function filterUsers(){
+  const q = document.getElementById('userSearch')?.value.toLowerCase()||'';
+  const filtered = q ? allSessions.filter(u=>(u.name+u.country).toLowerCase().includes(q)) : allSessions;
+  document.getElementById('usersTbl').innerHTML = usersTable(filtered);
+}
+
+// ── Media ─────────────────────────────────────────────
+function renderMedia(){
+  const totalSize = allMedia.reduce((a,f)=>a+f.size,0);
+  return`
+  <div class="section-title">
+    <span>Media Files (${allMedia.length}) — ${fmtBytes(totalSize)}</span>
+    <button class="act-btn danger" onclick="deleteAllMedia()">🗑 Delete All</button>
+  </div>
+  <div class="media-grid">${allMedia.map(f=>`
+    <div class="media-card" id="mc-${f.filename.replace(/\./g,'_')}">
+      ${f.isImage?`<img src="${f.url}" loading="lazy" onclick="openImg('${f.url}')" style="cursor:zoom-in">`:`<video src="${f.url}" controls style="width:100%;height:110px;object-fit:cover"></video>`}
+      <div class="media-info">
+        <div class="media-name">${f.filename}</div>
+        <div class="media-size">${fmtBytes(f.size)} · ${timeAgo(f.created)}</div>
+      </div>
+      <button class="media-del" onclick="deleteMedia('${f.filename}')">✕</button>
+    </div>`).join('')||'<div class="empty" style="grid-column:1/-1">No media files. All clean! ✓</div>'}
+  </div>`;
+}
+
+// ── Banned ────────────────────────────────────────────
+function renderBanned(){
+  const banned = allSessions.filter(u=>u.banned);
+  const savedBanned = statsData.bannedCount||0;
+  return`
+  <div class="section-title">Banned Sessions (${savedBanned} total, ${banned.length} currently in memory)</div>
+  <div class="tbl-wrap">
+    ${banned.length?`<table>
+      <tr><th>Name</th><th>Country</th><th>Warnings</th><th>Action</th></tr>
+      ${banned.map(u=>`<tr>
+        <td>${u.flag||''} <strong>${esc(u.name)}</strong></td>
+        <td>${esc(u.country||'—')}</td>
+        <td style="color:var(--red)">${u.warnings}/3</td>
+        <td><button class="act-btn" onclick="unbanUser('${u.sessId}','${esc(u.name)}')">✓ Unban</button></td>
+      </tr>`).join('')}
+    </table>`:'<div class="empty">No banned users in current sessions</div>'}
+  </div>`;
+}
+
+// ── Broadcast ─────────────────────────────────────────
+function renderBroadcast(){
+  return`
+  <div class="section-title">Send System Message to All Users</div>
+  <div class="broadcast-box">
+    <p style="font-size:.83rem;color:var(--mu);margin-bottom:12px">This message will appear as a system notification in all active chats.</p>
+    <textarea id="bcMsg" placeholder="Type your message…"></textarea>
+    <button onclick="sendBroadcast()">📢 Broadcast to ${statsData.online||0} online users</button>
+  </div>`;
+}
+
+// ── Analytics ─────────────────────────────────────────
+function renderAnalytics(){
+  const daily = statsData.dailyStats || {};
+  const days = Object.keys(daily).sort().slice(-14); // last 14 days
+  const maxUsers = Math.max(...days.map(d=>daily[d].users||0), 1);
+  const maxChats  = Math.max(...days.map(d=>daily[d].chats||0), 1);
+  return`
+  <div class="chart-wrap">
+    <div class="section-title">Daily Active Users (last 14 days)</div>
+    <div class="chart-bars">${days.map(d=>{
+      const h = Math.max(((daily[d].users||0)/maxUsers)*100, 2);
+      return`<div class="bar-col"><div class="bar" style="height:${h}%" title="${d}: ${daily[d].users||0} users"></div><div class="bar-label">${d.slice(5)}</div></div>`;
+    }).join('')||'<div class="empty">No data yet</div>'}</div>
+  </div>
+  <div class="chart-wrap">
+    <div class="section-title">Daily Chats Started</div>
+    <div class="chart-bars">${days.map(d=>{
+      const h = Math.max(((daily[d].chats||0)/maxChats)*100, 2);
+      return`<div class="bar-col"><div class="bar" style="height:${h}%;background:linear-gradient(180deg,var(--ac2),rgba(255,106,159,.3))" title="${d}: ${daily[d].chats||0} chats"></div><div class="bar-label">${d.slice(5)}</div></div>`;
+    }).join('')||'<div class="empty">No data yet</div>'}</div>
+  </div>
+  <div class="tbl-wrap">
+    <table>
+      <tr><th>Date</th><th>Users</th><th>Chats</th><th>Messages</th></tr>
+      ${[...days].reverse().map(d=>`<tr>
+        <td>${d}</td>
+        <td>${daily[d].users||0}</td>
+        <td>${daily[d].chats||0}</td>
+        <td>${daily[d].messages||0}</td>
+      </tr>`).join('')||'<tr><td colspan="4" style="text-align:center;color:var(--mu)">No data</td></tr>'}
+    </table>
+  </div>`;
+}
+
+// ── Actions ───────────────────────────────────────────
+async function viewChat(sessId){
+  const d = await api('GET',`/admin/api/chat/${sessId}`);
+  if(!d) return;
+  const win = window.open('','_blank','width=600,height=700');
+  const msgs = d.messages||[];
+  win.document.write(`<html><head><title>Chat: ${d.session.name}</title>
+  <style>body{font-family:sans-serif;background:#0d0d14;color:#f0eeff;padding:20px;}
+  .m{margin:8px 0;padding:10px;border-radius:8px;font-size:.875rem;}
+  .me{background:rgba(124,106,255,.2);margin-left:20%}.them{background:#1a1a2a;margin-right:20%}
+  .nm{font-size:.68rem;color:#888;margin-bottom:3px}.tx{line-height:1.4}
+  .tm{font-size:.62rem;color:#666;margin-top:3px}img{max-width:200px;border-radius:6px;margin-top:6px}
+  h2{margin-bottom:4px}p{font-size:.82rem;color:#888;margin-bottom:16px}</style></head><body>
+  <h2>💬 ${d.session.name}</h2>
+  <p>Partner: ${d.partner?.name||'—'} · ${msgs.length} messages</p>
+  ${msgs.map(m=>`<div class="m ${m.fromName===d.session.name?'me':'them'}">
+    <div class="nm">${m.fromName}</div>
+    <div class="tx">${m.unsent?'<em style="opacity:.5">🗑️ Unsent</em>':m.type==='image'?`<img src="${m.url}">`:m.type==='gif'?`<img src="${m.gif}">`:m.text||'[media]'}</div>
+    <div class="tm">${new Date(m.timestamp).toLocaleTimeString()}</div>
+  </div>`).join('')||'<p>No messages</p>'}
+  </body></html>`);
+}
+
+async function kickUser(sessId){
+  if(!confirm('Kick this user?')) return;
+  await api('POST',`/admin/api/kick/${sessId}`);
+  showToast('User kicked','ok'); loadAll();
+}
+
+async function banUser(sessId, name){
+  if(!confirm(`Ban ${name}? They will be disconnected immediately.`)) return;
+  await api('POST',`/admin/api/ban/${sessId}`);
+  showToast(`${name} banned`,'ok'); loadAll();
+}
+
+async function unbanUser(sessId, name){
+  await api('POST',`/admin/api/unban/${sessId}`);
+  showToast(`${name} unbanned`,'ok'); loadAll();
+}
+
+async function deleteMedia(filename){
+  if(!confirm(`Delete ${filename}?`)) return;
+  await api('DELETE',`/admin/api/media/${filename}`);
+  allMedia = allMedia.filter(f=>f.filename!==filename);
+  showToast('File deleted','ok');
+  renderTab(currentTab);
+}
+
+async function deleteAllMedia(){
+  if(!confirm(`Delete ALL ${allMedia.length} media files? This cannot be undone.`)) return;
+  const r = await api('DELETE','/admin/api/media');
+  showToast(`Deleted ${r?.deleted||0} files`,'ok');
+  allMedia = []; renderTab(currentTab);
+}
+
+async function sendBroadcast(){
+  const msg = document.getElementById('bcMsg')?.value.trim();
+  if(!msg) return;
+  const r = await api('POST','/admin/api/broadcast',{message:msg});
+  showToast(`Sent to ${r?.sent||0} users`,'ok');
+  document.getElementById('bcMsg').value='';
+}
+
+function openImg(url){ window.open(url,'_blank'); }
+
+// ── Utils ─────────────────────────────────────────────
+function fmtBytes(b){
+  if(!b||b<1024) return (b||0)+' B';
+  if(b<1024*1024) return (b/1024).toFixed(1)+' KB';
+  return (b/1024/1024).toFixed(1)+' MB';
+}
+function timeAgo(d){
+  const s=Math.floor((Date.now()-new Date(d))/1000);
+  if(s<60) return s+'s ago';
+  if(s<3600) return Math.floor(s/60)+'m ago';
+  if(s<86400) return Math.floor(s/3600)+'h ago';
+  return Math.floor(s/86400)+'d ago';
+}
+function esc(t){return(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+let toastTmr=null;
+function showToast(msg,type=''){
+  const t=document.getElementById('adminToast');
+  t.textContent=msg;t.className='admin-toast'+(type?' '+type:'');t.classList.add('show');
+  clearTimeout(toastTmr);toastTmr=setTimeout(()=>t.classList.remove('show'),3000);
+}
+</script>
+</body>
+</html>
