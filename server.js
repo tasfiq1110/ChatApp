@@ -74,6 +74,15 @@ app.post('/upload', upload.single('file'), (req, res) => {
   res.json({ url: `/uploads/${req.file.filename}`, filename: req.file.filename, mimetype: req.file.mimetype });
 });
 
+// Client reports a blocked nudity attempt — file was already uploaded then flagged
+app.post('/report-nudity', express.json(), (req, res) => {
+  const { filename, url, sessId } = req.body;
+  const sess = sessId ? [...sessions.values()].find(s => s.sessId === sessId) : null;
+  const ip   = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:','');
+  logViolation('nudity', sess, ip, filename, filename, url);
+  res.json({ ok: true });
+});
+
 // ─── Helpers ───────────────────────────────────────────
 const ADJ   = ['Swift','Cosmic','Neon','Silent','Wild','Vivid','Lunar','Mystic','Pixel','Frosted','Electric','Amber','Crystal','Shadow','Velvet'];
 const NOUNS = ['Fox','Panda','Wolf','Eagle','Comet','Nova','Drift','Spark','Blaze','Storm','Raven','Tiger','Lynx','Hawk','Orca'];
@@ -111,14 +120,11 @@ function pruneQ(arr) {
   }
 }
 
-// Cleanly break a pair
+// Cleanly break a pair — does NOT delete files (admin reviews them, midnight cleanup handles it)
 function breakPair(sessId) {
   const s = sessions.get(sessId);
   if (!s || !s.partnerId) return;
   const p = sessions.get(s.partnerId);
-  // Delete uploaded files
-  for (const m of (s.messages || []))
-    if (m.filename) { try { fs.unlinkSync(path.join(UPLOAD_DIR, m.filename)); } catch {} }
   if (p) { p.partnerId = null; p.roomId = null; p.messages = []; }
   s.partnerId = null; s.roomId = null; s.messages = [];
 }
@@ -212,18 +218,39 @@ function rateOk(sessId) {
 const ADMIN_PASS   = process.env.ADMIN_PASSWORD || 'zapp_admin_2025';
 const adminTokens  = new Set();
 
-// Persistent stats
+// ─── Persistent stats ─────────────────────────────────
 const STATS_FILE = path.join(__dirname, 'stats.json');
 function loadStats() {
   try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch {}
-  return { totalChats:0, totalMessages:0, totalUsers:0, dailyStats:{}, bannedSessions:[] };
+  return { totalChats:0, totalMessages:0, totalUsers:0, dailyStats:{}, bannedSessions:[], bannedIPs:[], violations:[] };
 }
 function saveStats() { try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats,null,2)); } catch {} }
 let stats = loadStats();
 
 const bannedSessions = new Set(stats.bannedSessions || []);
+const bannedIPs      = new Set(stats.bannedIPs || []);
+if (!stats.violations) stats.violations = [];
 
-// DAU tracking
+// Violation logger
+function logViolation(type, sess, ip, content, filename, url) {
+  const entry = {
+    id: uuidv4(), ts: Date.now(), type,
+    name: sess?.name||'Unknown', country: sess?.country?.name||'', flag: sess?.country?.flag||'',
+    sessId: sess?.sessId||'', ip: ip||'', content: content||'', filename: filename||'', url: url||''
+  };
+  stats.violations.unshift(entry);
+  if (stats.violations.length > 500) stats.violations = stats.violations.slice(0, 500);
+  saveStats();
+  return entry;
+}
+
+// Get real IP from socket
+function getIP(socket) {
+  return (socket.handshake.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+          socket.handshake.address || '').replace('::ffff:', '');
+}
+
+// ─── DAU tracking ──────────────────────────────────────
 const todayKey   = () => new Date().toISOString().slice(0,10);
 const dailyUsers = new Set();
 let   dailyDate  = todayKey();
@@ -241,7 +268,24 @@ function incDay(key) {
   stats.dailyStats[t][key] = (stats.dailyStats[t][key]||0)+1;
 }
 
-// Admin auth middleware
+// ─── Midnight auto-cleanup ─────────────────────────────
+function scheduleCleanup() {
+  const now = new Date();
+  const next = new Date(now); next.setHours(24,0,5,0);
+  setTimeout(() => {
+    try {
+      const files = fs.readdirSync(UPLOAD_DIR);
+      let deleted = 0;
+      files.forEach(f => { try { fs.unlinkSync(path.join(UPLOAD_DIR, f)); deleted++; } catch {} });
+      console.log(`[Midnight cleanup] Deleted ${deleted} files`);
+    } catch(e) { console.error('[Cleanup error]', e.message); }
+    scheduleCleanup();
+  }, next - now);
+}
+scheduleCleanup();
+
+// ─── Admin config ──────────────────────────────────────
+
 function adminAuth(req,res,next){
   const tok = req.headers['x-admin-token']||req.query.token;
   if(adminTokens.has(tok)) return next();
@@ -265,22 +309,24 @@ app.get('/admin/api/stats', adminAuth, (req,res)=>{
   let mediaFiles=[];
   try{ mediaFiles=fs.readdirSync(UPLOAD_DIR).map(f=>{const fp=path.join(UPLOAD_DIR,f);const st=fs.statSync(fp);return{filename:f,size:st.size,created:st.birthtime};}).sort((a,b)=>new Date(b.created)-new Date(a.created)); }catch{}
   res.json({ online, activePairs:Math.floor(paired), waiting, totalSessions:sessions.size,
-    bannedCount:bannedSessions.size, totalChats:stats.totalChats, totalMessages:stats.totalMessages,
-    totalUsers:stats.totalUsers, todayDAU:dailyUsers.size, dailyStats:stats.dailyStats, mediaFiles });
+    bannedCount:bannedSessions.size, bannedIPCount:bannedIPs.size,
+    totalChats:stats.totalChats, totalMessages:stats.totalMessages,
+    totalUsers:stats.totalUsers, todayDAU:dailyUsers.size, dailyStats:stats.dailyStats,
+    mediaFiles, violationCount:stats.violations.length });
 });
 
 app.get('/admin/api/sessions', adminAuth, (req,res)=>{
   res.json([...sessions.values()].map(s=>({
     sessId:s.sessId, name:s.name, country:s.country?.name||'', flag:s.country?.flag||'',
     interests:s.interests||[], online:!!s.sockId, inChat:!!s.partnerId,
-    warnings:s.warnings||0, banned:bannedSessions.has(s.sessId), msgCount:(s.messages||[]).length
+    warnings:s.warnings||0, banned:bannedSessions.has(s.sessId), msgCount:(s.messages||[]).length, ip:s.ip||''
   })));
 });
 
 app.get('/admin/api/chat/:sessId', adminAuth, (req,res)=>{
   const s=sessions.get(req.params.sessId); if(!s) return res.status(404).json({error:'Not found'});
   const p=s.partnerId?sessions.get(s.partnerId):null;
-  res.json({ session:{name:s.name,country:s.country?.name||'',interests:s.interests},
+  res.json({ session:{name:s.name,country:s.country?.name||'',interests:s.interests,ip:s.ip||''},
     partner:p?{name:p.name,country:p.country?.name||''}:null,
     messages:(s.messages||[]).map(m=>({id:m.id,type:m.type,text:m.text,url:m.url,gif:m.gif,
       timestamp:m.timestamp,unsent:m.unsent,fromName:m.sessId===s.sessId?s.name:(p?.name||'Partner')})) });
@@ -305,13 +351,49 @@ app.post('/admin/api/kick/:sessId', adminAuth, (req,res)=>{
   res.json({ok:true});
 });
 
+// ─── IP ban routes ─────────────────────────────────────
+app.get('/admin/api/banned-ips', adminAuth, (req,res)=>res.json([...bannedIPs]));
+
+app.post('/admin/api/ban-ip', adminAuth, express.json(), (req,res)=>{
+  const {ip}=req.body; if(!ip) return res.status(400).json({error:'No IP'});
+  bannedIPs.add(ip); stats.bannedIPs=[...bannedIPs]; saveStats();
+  let kicked=0;
+  for(const [sid,s] of sessions){
+    if(s.ip===ip){
+      const sock=getSock(sid); if(sock){sock.emit('banned');setTimeout(()=>sock.disconnect(),500);}
+      if(s.partnerId){emitTo(s.partnerId,'partner_left');breakPair(sid);}
+      sessions.delete(sid); kicked++;
+    }
+  }
+  res.json({ok:true,kicked});
+});
+
+app.post('/admin/api/unban-ip', adminAuth, express.json(), (req,res)=>{
+  const {ip}=req.body; if(!ip) return res.status(400).json({error:'No IP'});
+  bannedIPs.delete(ip); stats.bannedIPs=[...bannedIPs]; saveStats();
+  res.json({ok:true});
+});
+
+// ─── Violations log ────────────────────────────────────
+app.get('/admin/api/violations', adminAuth, (req,res)=>{
+  const type=req.query.type;
+  res.json(type ? stats.violations.filter(v=>v.type===type) : stats.violations);
+});
+
+app.delete('/admin/api/violations', adminAuth, (req,res)=>{
+  stats.violations=[]; saveStats(); res.json({ok:true});
+});
+
+// ─── Media routes ──────────────────────────────────────
 app.get('/admin/api/media', adminAuth, (req,res)=>{
   try{
     const files=fs.readdirSync(UPLOAD_DIR).map(f=>{
       const fp=path.join(UPLOAD_DIR,f); const st=fs.statSync(fp);
       const ext=path.extname(f).toLowerCase();
+      const violation=stats.violations.find(v=>v.filename===f);
       return{filename:f,url:`/uploads/${f}`,size:st.size,
-        isImage:['.jpg','.jpeg','.png','.gif','.webp'].includes(ext),created:st.birthtime};
+        isImage:['.jpg','.jpeg','.png','.gif','.webp'].includes(ext),created:st.birthtime,
+        flagged:!!violation,violationType:violation?.type||null};
     }).sort((a,b)=>new Date(b.created)-new Date(a.created));
     res.json(files);
   }catch{res.json([]);}
@@ -349,6 +431,15 @@ io.on('connection', socket => {
   // Contains sessionId (null if new), plus current country+interests.
   // Handling everything in ONE event eliminates all ordering race conditions.
   socket.on('init', ({ sessId: clientSessId, country, interests }) => {
+    const ip = getIP(socket);
+
+    // Check IP ban immediately
+    if (bannedIPs.has(ip)) {
+      socket.emit('banned');
+      setTimeout(() => socket.disconnect(), 500);
+      return;
+    }
+
     let s;
 
     if (clientSessId && sessions.has(clientSessId)) {
@@ -363,6 +454,7 @@ io.on('connection', socket => {
       if (s.sockId && s.sockId !== socket.id) sockToSess.delete(s.sockId);
       s.sockId = socket.id;
       sockToSess.set(socket.id, clientSessId);
+      s.ip = ip; // update IP in case it changed
       trackDAU(clientSessId);
 
       // Update profile
@@ -412,7 +504,7 @@ io.on('connection', socket => {
         country:   (country && (country.code || country.flag)) ? country : null,
         interests: Array.isArray(interests) ? interests.slice(0, 5) : [],
         warnings: 0, partnerId: null, roomId: null, messages: [], sockId: socket.id,
-        connectedAt: Date.now()
+        ip, connectedAt: Date.now()
       };
       sessions.set(newId, s);
       sockToSess.set(socket.id, newId);
@@ -469,6 +561,7 @@ io.on('connection', socket => {
     if (data.type === 'text' && data.text) {
       if (hasBad(data.text)) {
         s.warnings++;
+        logViolation('badword', s, s.ip, data.text, null, null);
         socket.emit('content_warning', { warns: s.warnings, max: 3 });
         if (s.warnings >= 3) { socket.emit('banned'); setTimeout(() => socket.disconnect(), 500); return; }
         data.text = censor(data.text);
@@ -505,7 +598,7 @@ io.on('connection', socket => {
     if (!s?.messages || !s.roomId) return;
     const m = s.messages.find(m => m.id === msgId && m.sessId === s.sessId);
     if (!m) return;
-    if (m.filename) try { fs.unlinkSync(path.join(UPLOAD_DIR, m.filename)); } catch {}
+    // Don't delete file — admin may need to review it
     m.unsent = true; m.text = ''; m.url = null; m.gif = null;
     io.to(s.roomId).emit('message_unsent', { msgId });
   });
