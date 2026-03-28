@@ -136,6 +136,7 @@ function joinPair(sA, sB) {
   const shared = (sA.interests || []).filter(t => (sB.interests || []).includes(t));
   if (sockA) sockA.emit('connected', { partnerName: sB.name, myName: sA.name, partnerCountry: sB.country || {}, sharedInterests: shared });
   if (sockB) sockB.emit('connected', { partnerName: sA.name, myName: sB.name, partnerCountry: sA.country || {}, sharedInterests: shared });
+  stats.totalChats++; incDay('chats'); saveStats();
 }
 
 // ─── Matchmaking ────────────────────────────────────────
@@ -207,6 +208,134 @@ function rateOk(sessId) {
   return r.count <= RATE_MAX;
 }
 
+// ─── Admin config ──────────────────────────────────────
+const ADMIN_PASS   = process.env.ADMIN_PASSWORD || 'zapp_admin_2025';
+const adminTokens  = new Set();
+
+// Persistent stats
+const STATS_FILE = path.join(__dirname, 'stats.json');
+function loadStats() {
+  try { return JSON.parse(fs.readFileSync(STATS_FILE, 'utf8')); } catch {}
+  return { totalChats:0, totalMessages:0, totalUsers:0, dailyStats:{}, bannedSessions:[] };
+}
+function saveStats() { try { fs.writeFileSync(STATS_FILE, JSON.stringify(stats,null,2)); } catch {} }
+let stats = loadStats();
+
+const bannedSessions = new Set(stats.bannedSessions || []);
+
+// DAU tracking
+const todayKey   = () => new Date().toISOString().slice(0,10);
+const dailyUsers = new Set();
+let   dailyDate  = todayKey();
+function trackDAU(sessId) {
+  const today = todayKey();
+  if (today !== dailyDate) {
+    stats.dailyStats[dailyDate] = { ...(stats.dailyStats[dailyDate]||{}), users: dailyUsers.size };
+    dailyUsers.clear(); dailyDate = today; saveStats();
+  }
+  dailyUsers.add(sessId);
+}
+function incDay(key) {
+  const t = todayKey();
+  if (!stats.dailyStats[t]) stats.dailyStats[t] = { users:0, chats:0, messages:0 };
+  stats.dailyStats[t][key] = (stats.dailyStats[t][key]||0)+1;
+}
+
+// Admin auth middleware
+function adminAuth(req,res,next){
+  const tok = req.headers['x-admin-token']||req.query.token;
+  if(adminTokens.has(tok)) return next();
+  res.status(401).json({error:'Unauthorized'});
+}
+
+app.post('/admin/login', express.json(), (req,res)=>{
+  if(req.body.password===ADMIN_PASS){
+    const tok=uuidv4(); adminTokens.add(tok);
+    setTimeout(()=>adminTokens.delete(tok), 24*60*60*1000);
+    res.json({token:tok});
+  } else res.status(401).json({error:'Wrong password'});
+});
+
+app.get('/admin', (_,res)=>res.sendFile(path.join(__dirname,'public','admin.html')));
+
+app.get('/admin/api/stats', adminAuth, (req,res)=>{
+  const paired  = [...sessions.values()].filter(s=>s.partnerId).length/2;
+  const waiting = globalQ.length + [...interestQs.values()].reduce((a,q)=>a+q.length,0);
+  const online  = [...sessions.values()].filter(s=>s.sockId).length;
+  let mediaFiles=[];
+  try{ mediaFiles=fs.readdirSync(UPLOAD_DIR).map(f=>{const fp=path.join(UPLOAD_DIR,f);const st=fs.statSync(fp);return{filename:f,size:st.size,created:st.birthtime};}).sort((a,b)=>new Date(b.created)-new Date(a.created)); }catch{}
+  res.json({ online, activePairs:Math.floor(paired), waiting, totalSessions:sessions.size,
+    bannedCount:bannedSessions.size, totalChats:stats.totalChats, totalMessages:stats.totalMessages,
+    totalUsers:stats.totalUsers, todayDAU:dailyUsers.size, dailyStats:stats.dailyStats, mediaFiles });
+});
+
+app.get('/admin/api/sessions', adminAuth, (req,res)=>{
+  res.json([...sessions.values()].map(s=>({
+    sessId:s.sessId, name:s.name, country:s.country?.name||'', flag:s.country?.flag||'',
+    interests:s.interests||[], online:!!s.sockId, inChat:!!s.partnerId,
+    warnings:s.warnings||0, banned:bannedSessions.has(s.sessId), msgCount:(s.messages||[]).length
+  })));
+});
+
+app.get('/admin/api/chat/:sessId', adminAuth, (req,res)=>{
+  const s=sessions.get(req.params.sessId); if(!s) return res.status(404).json({error:'Not found'});
+  const p=s.partnerId?sessions.get(s.partnerId):null;
+  res.json({ session:{name:s.name,country:s.country?.name||'',interests:s.interests},
+    partner:p?{name:p.name,country:p.country?.name||''}:null,
+    messages:(s.messages||[]).map(m=>({id:m.id,type:m.type,text:m.text,url:m.url,gif:m.gif,
+      timestamp:m.timestamp,unsent:m.unsent,fromName:m.sessId===s.sessId?s.name:(p?.name||'Partner')})) });
+});
+
+app.post('/admin/api/ban/:sessId', adminAuth, (req,res)=>{
+  const id=req.params.sessId; bannedSessions.add(id);
+  stats.bannedSessions=[...bannedSessions]; saveStats();
+  const s=sessions.get(id);
+  if(s){ const sock=getSock(id); if(sock){sock.emit('banned');setTimeout(()=>sock.disconnect(),500);}
+    if(s.partnerId){emitTo(s.partnerId,'partner_left');breakPair(id);} sessions.delete(id); }
+  res.json({ok:true});
+});
+
+app.post('/admin/api/unban/:sessId', adminAuth, (req,res)=>{
+  bannedSessions.delete(req.params.sessId); stats.bannedSessions=[...bannedSessions]; saveStats();
+  res.json({ok:true});
+});
+
+app.post('/admin/api/kick/:sessId', adminAuth, (req,res)=>{
+  const sock=getSock(req.params.sessId); if(sock) sock.disconnect();
+  res.json({ok:true});
+});
+
+app.get('/admin/api/media', adminAuth, (req,res)=>{
+  try{
+    const files=fs.readdirSync(UPLOAD_DIR).map(f=>{
+      const fp=path.join(UPLOAD_DIR,f); const st=fs.statSync(fp);
+      const ext=path.extname(f).toLowerCase();
+      return{filename:f,url:`/uploads/${f}`,size:st.size,
+        isImage:['.jpg','.jpeg','.png','.gif','.webp'].includes(ext),created:st.birthtime};
+    }).sort((a,b)=>new Date(b.created)-new Date(a.created));
+    res.json(files);
+  }catch{res.json([]);}
+});
+
+app.delete('/admin/api/media/:filename', adminAuth, (req,res)=>{
+  const fp=path.join(UPLOAD_DIR, path.basename(req.params.filename));
+  try{fs.unlinkSync(fp);res.json({ok:true});}catch{res.status(404).json({error:'Not found'});}
+});
+
+app.delete('/admin/api/media', adminAuth, (req,res)=>{
+  try{const files=fs.readdirSync(UPLOAD_DIR);files.forEach(f=>{try{fs.unlinkSync(path.join(UPLOAD_DIR,f));}catch{}});res.json({ok:true,deleted:files.length});}
+  catch{res.status(500).json({error:'Failed'});}
+});
+
+app.post('/admin/api/broadcast', adminAuth, express.json(), (req,res)=>{
+  const {message}=req.body; if(!message) return res.status(400).json({error:'No message'});
+  io.emit('admin_broadcast',{message}); res.json({ok:true,sent:sessions.size});
+});
+
+app.get('/admin/api/daily', adminAuth, (req,res)=>res.json(stats.dailyStats));
+
+setInterval(()=>{ stats.dailyStats[todayKey()]={...(stats.dailyStats[todayKey()]||{}),users:dailyUsers.size}; saveStats(); }, 5*60*1000);
+
 // ─── Profanity ──────────────────────────────────────────
 const BAD = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
 const hasBad = t => { const n=t.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s'); return BAD.some(w=>n.includes(w)); };
@@ -234,6 +363,7 @@ io.on('connection', socket => {
       if (s.sockId && s.sockId !== socket.id) sockToSess.delete(s.sockId);
       s.sockId = socket.id;
       sockToSess.set(socket.id, clientSessId);
+      trackDAU(clientSessId);
 
       // Update profile
       if (country && (country.code || country.flag)) s.country = country;
@@ -281,10 +411,12 @@ io.on('connection', socket => {
         sessId: newId, name: randName(),
         country:   (country && (country.code || country.flag)) ? country : null,
         interests: Array.isArray(interests) ? interests.slice(0, 5) : [],
-        warnings: 0, partnerId: null, roomId: null, messages: [], sockId: socket.id
+        warnings: 0, partnerId: null, roomId: null, messages: [], sockId: socket.id,
+        connectedAt: Date.now()
       };
       sessions.set(newId, s);
       sockToSess.set(socket.id, newId);
+      stats.totalUsers++; incDay('users'); trackDAU(newId);
       socket.emit('init_ok', { sessId: newId, name: s.name });
     }
   });
@@ -331,6 +463,8 @@ io.on('connection', socket => {
   socket.on('send_message', data => {
     const s = sessions.get(sockToSess.get(socket.id));
     if (!s || !s.partnerId || !s.roomId) return;
+    // Check if banned
+    if (bannedSessions.has(s.sessId)) { socket.emit('banned'); setTimeout(()=>socket.disconnect(),500); return; }
     if (!rateOk(s.sessId)) { socket.emit('rate_limited'); return; }
     if (data.type === 'text' && data.text) {
       if (hasBad(data.text)) {
@@ -351,6 +485,7 @@ io.on('connection', socket => {
     };
     s.messages.push(msg);
     io.to(s.roomId).emit('new_message', msg);
+    stats.totalMessages++; incDay('messages');
   });
 
   socket.on('typing', v => {
