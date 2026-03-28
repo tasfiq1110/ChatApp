@@ -171,7 +171,8 @@ body{
 .modal-icon{font-size:3rem;margin-bottom:12px;}
 .modal-title{font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:8px;color:var(--danger);}
 .modal-text{font-size:.85rem;color:var(--muted);line-height:1.6;margin-bottom:20px;}
-.modal-btn{padding:12px 32px;border-radius:100px;border:none;background:var(--danger);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;cursor:pointer;width:100%;}
+.modal-btn{padding:12px 32px;border-radius:100px;border:none;background:var(--danger);color:#fff;font-family:'Syne',sans-serif;font-weight:700;font-size:.9rem;cursor:pointer;width:100%;-webkit-tap-highlight-color:transparent;}
+.modal-btn:active{opacity:.85;}
 .modal-warn-count{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;background:rgba(255,179,71,.15);border:1px solid rgba(255,179,71,.3);border-radius:100px;font-size:.75rem;color:var(--warning);margin-bottom:12px;}
 
 ::-webkit-scrollbar{width:3px;height:3px;}
@@ -277,6 +278,29 @@ body{
   </div>
 </div>
 
+<!-- Confirm Modal (skip/end) -->
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal">
+    <div class="modal-icon" id="confirmIcon">❓</div>
+    <div class="modal-title" id="confirmTitle" style="color:var(--text);">Are you sure?</div>
+    <div class="modal-text" id="confirmText">This will end your current chat.</div>
+    <div style="display:flex;gap:10px;margin-top:4px;">
+      <button class="modal-btn" id="confirmCancel" onclick="closeConfirm()" style="background:var(--surface2);border:1px solid var(--border);color:var(--muted);flex:1;">Cancel</button>
+      <button class="modal-btn" id="confirmOk" style="flex:1;">Yes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Image blocked modal -->
+<div class="modal-overlay" id="imgBlockModal">
+  <div class="modal">
+    <div class="modal-icon">🔞</div>
+    <div class="modal-title" style="color:var(--danger);">Image Blocked</div>
+    <div class="modal-text">This image was flagged as potentially containing nudity or explicit content and was not sent.</div>
+    <button class="modal-btn" onclick="document.getElementById('imgBlockModal').classList.remove('open')">OK</button>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -374,6 +398,7 @@ const socket = io({
 });
 let myName='',partnerName='',typingTimer=null,isTyping=false,activePanel=null;
 let totalChats = Math.floor(Math.random()*5000+1000);
+let activePairConnected = false; // true when paired with someone
 
 socket.on('connect', () => {
   const btn = document.querySelector('.start-btn');
@@ -385,6 +410,7 @@ socket.on('connect_error', () => {
   btn.textContent = 'Connecting... ⏳'; btn.disabled = true;
 });
 socket.on('disconnect', () => {
+  activePairConnected = false;
   if (document.getElementById('chat').classList.contains('active')) addSysMsg('Connection lost. Reconnecting...');
 });
 socket.on('assigned_name', name => {
@@ -408,6 +434,7 @@ socket.on('connected', ({partnerName:pn, myName:mn, partnerCountry:pc}) => {
   document.querySelector('.online-dot').style.background = 'var(--success)';
   document.getElementById('messages').innerHTML = '';
   myWarnCount = 0;
+  activePairConnected = true;
   const loc = partnerCountry.name ? ` from ${partnerCountry.flag} ${partnerCountry.name}` : '';
   addSysMsg(`🎉 Connected with ${pn}${loc}! Say hello!`);
   showScreen('chat');
@@ -420,6 +447,7 @@ socket.on('partner_typing', isT => {
   s.className = isT ? 'partner-status typing' : 'partner-status';
 });
 socket.on('partner_left', () => {
+  activePairConnected = false;
   addSysMsg(`${partnerName} has left the chat.`);
   document.getElementById('partnerStatus').textContent = 'Disconnected';
   document.getElementById('partnerStatus').className = 'partner-status';
@@ -432,7 +460,7 @@ socket.on('content_warning', ({warns, max}) => {
   else showWarnModal(warns, max, true);
 });
 socket.on('banned', () => showWarnModal(3, 3, true));
-socket.on('chat_ended', () => { showScreen('landing'); showToast('Chat ended. All messages deleted. 🔒'); });
+socket.on('chat_ended', () => { activePairConnected = false; showScreen('landing'); showToast('Chat ended. All messages deleted. 🔒'); });
 
 // =================== UI ===================
 function showScreen(id) {
@@ -442,8 +470,39 @@ function showScreen(id) {
 }
 function startChat() { socket.emit('set_country', myCountry); socket.emit('find_partner'); }
 function cancelSearch() { socket.emit('end_chat'); showScreen('landing'); }
-function skipChat() { addSysMsg('Skipping...'); closeAllPanels(); socket.emit('skip'); showScreen('searching'); }
-function endChat() { socket.emit('end_chat'); showScreen('landing'); }
+
+// Confirmation helpers
+function showConfirm(icon, title, text, okLabel, okColor, onOk) {
+  document.getElementById('confirmIcon').textContent = icon;
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmText').textContent = text;
+  const okBtn = document.getElementById('confirmOk');
+  okBtn.textContent = okLabel;
+  okBtn.style.background = okColor;
+  okBtn.onclick = () => { closeConfirm(); onOk(); };
+  document.getElementById('confirmModal').classList.add('open');
+}
+function closeConfirm() { document.getElementById('confirmModal').classList.remove('open'); }
+
+function skipChat() {
+  // Only confirm if actually connected (partner exists)
+  if (activePairConnected) {
+    showConfirm('⏭️','Skip this chat?',`You will leave ${partnerName} and search for a new stranger.`,'Skip','var(--accent3)',() => {
+      addSysMsg('Skipping...'); closeAllPanels(); socket.emit('skip'); showScreen('searching');
+    });
+  } else {
+    closeAllPanels(); socket.emit('skip'); showScreen('searching');
+  }
+}
+function endChat() {
+  if (activePairConnected) {
+    showConfirm('✖','End this chat?','This will permanently end your conversation. All messages will be deleted.','End Chat','var(--danger)',() => {
+      socket.emit('end_chat'); showScreen('landing');
+    });
+  } else {
+    socket.emit('end_chat'); showScreen('landing');
+  }
+}
 
 // =================== MESSAGING ===================
 function handleKey(e) { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendText(); } }
@@ -475,7 +534,70 @@ function sendEmoji(e) { socket.emit('send_message', {type:'emoji', text:e}); clo
 function sendGif(url) { socket.emit('send_message', {type:'gif', gif:url}); closeAllPanels(); }
 
 async function handleFileSelect(e) {
-  const f = e.target.files[0]; if (!f) return; e.target.value=''; await uploadAndSend(f);
+  const f = e.target.files[0]; if (!f) return; e.target.value='';
+  if (f.type.startsWith('image/')) {
+    showToast('🔍 Scanning image for safety...');
+    const safe = await scanImageForNudity(f);
+    if (!safe) {
+      document.getElementById('imgBlockModal').classList.add('open');
+      showToast('🚫 Image blocked — explicit content detected', 'warn');
+      return;
+    }
+    showToast('✅ Image looks safe, sending...');
+  }
+  await uploadAndSend(f);
+}
+
+// Image nudity/explicit content detection using canvas pixel analysis
+async function scanImageForNudity(file) {
+  // 1. Check filename for explicit keywords
+  const name = file.name.toLowerCase();
+  const badNames = ['nude','naked','nsfw','porn','sex','xxx','adult','boob','dick','cock','pussy','ass','explicit','onlyfans','lewd'];
+  if (badNames.some(w => name.includes(w))) return false;
+
+  // 2. Canvas-based skin tone analysis
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const size = 100; // larger sample = more accurate
+        canvas.width = size; canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, size, size);
+        const data = ctx.getImageData(0, 0, size, size).data;
+        let skinPixels = 0;
+        const totalPixels = size * size;
+        for (let i = 0; i < data.length; i += 4) {
+          const r = data[i], g = data[i+1], b = data[i+2], a = data[i+3];
+          if (a < 128) continue; // skip transparent
+          // Multi-range skin tone detection (covers all ethnicities)
+          const isSkin =
+            // Light skin
+            (r > 200 && g > 150 && b > 120 && r > g && g > b) ||
+            // Medium skin
+            (r > 150 && g > 90 && b > 60 && r > g && r > b && r-b > 30 && Math.abs(r-g) < 80) ||
+            // Darker skin
+            (r > 90 && g > 50 && b > 30 && r > g && r > b && r-b > 20 && r < 200) ||
+            // General formula
+            (r > 60 && g > 30 && b > 15 && r > g && r > b &&
+             r/(g+1) > 1.1 && r/(g+1) < 3.0 &&
+             Math.abs(r-g) > 10 && r-b > 10);
+          if (isSkin) skinPixels++;
+        }
+        URL.revokeObjectURL(url);
+        const skinRatio = skinPixels / totalPixels;
+        // Block if >42% of image is skin-toned (likely nudity)
+        resolve(skinRatio < 0.42);
+      } catch(e) {
+        URL.revokeObjectURL(url);
+        resolve(true); // allow if scan fails
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(true); };
+    img.src = url;
+  });
 }
 async function uploadAndSend(file) {
   const prog = document.getElementById('uploadProgress');
@@ -575,7 +697,7 @@ document.getElementById('emojiGrid').innerHTML = EMOJIS.map(e=>`<button class="e
 let gifTimer=null;
 document.getElementById('gifSearch').addEventListener('input', e => { clearTimeout(gifTimer); gifTimer=setTimeout(()=>searchGifs(e.target.value),400); });
 async function loadTrendingGifs() {
-  const terms=['funny','cute','wow','yes','love','hi','lol','okay','nice','cool'];
+  const terms=['funny','cute','happy','love','hi','wow','lol','cool','yes','nice'];
   await searchGifs(terms[Math.floor(Math.random()*terms.length)]);
 }
 async function searchGifs(query) {
@@ -583,11 +705,43 @@ async function searchGifs(query) {
   const grid=document.getElementById('gifGrid');
   grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">Loading...</div>';
   try {
-    const r=await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=LIVDSRZULELA&limit=9&media_filter=gif`);
+    // Tenor v1 API - correct endpoint and structure
+    const r=await fetch(`https://g.tenor.com/v1/search?q=${encodeURIComponent(query)}&key=LIVDSRZULELA&limit=12&contentfilter=medium&media_filter=minimal&ar_range=all`);
     const d=await r.json();
-    if (!d.results?.length) { grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">No GIFs found</div>'; return; }
-    grid.innerHTML=d.results.map(r=>{const g=r.media_formats?.gif?.url||r.media_formats?.tinygif?.url;const p=r.media_formats?.tinygif?.url||g;return`<div class="gif-item" onclick="sendGif('${g}')"><img src="${p}" loading="lazy"></div>`;}).join('');
-  } catch(e) { grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">Could not load GIFs</div>'; }
+    if (!d.results?.length) {
+      grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">No GIFs found</div>';
+      return;
+    }
+    const items = d.results.map(item => {
+      // Tenor v1: item.media is an array of objects
+      const media = Array.isArray(item.media) ? item.media[0] : item.media;
+      if (!media) return '';
+      // Try multiple format keys in order of preference
+      const gifUrl = (media.gif||media.mediumgif||media.tinygif||media.nanogif||{}).url || '';
+      const previewUrl = (media.tinygif||media.nanogif||media.gif||{}).url || gifUrl;
+      if (!gifUrl) return '';
+      // Escape for onclick attribute
+      const safeGif = gifUrl.replace(/'/g,'%27');
+      return `<div class="gif-item" onclick="sendGif('${safeGif}')"><img src="${previewUrl}" loading="lazy" onerror="this.parentElement.style.display='none'"></div>`;
+    }).filter(Boolean).join('');
+    grid.innerHTML = items || '<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">No GIFs found</div>';
+  } catch(e) {
+    // Fallback: try Tenor v2 API
+    try {
+      const r2=await fetch(`https://tenor.googleapis.com/v2/search?q=${encodeURIComponent(query)}&key=AIzaSyAyimkuYQYF_FXVALexPuGQctUWRURdCYQ&limit=9&media_filter=gif`);
+      const d2=await r2.json();
+      if (d2.results?.length) {
+        grid.innerHTML=d2.results.map(r=>{
+          const g=r.media_formats?.gif?.url||r.media_formats?.tinygif?.url||'';
+          const p=r.media_formats?.tinygif?.url||g;
+          if(!g) return '';
+          return `<div class="gif-item" onclick="sendGif('${g.replace(/'/g,'%27')}')"><img src="${p}" loading="lazy"></div>`;
+        }).filter(Boolean).join('') || '<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">No GIFs found</div>';
+        return;
+      }
+    } catch(e2){}
+    grid.innerHTML='<div style="color:var(--muted);font-size:.8rem;grid-column:1/-1;text-align:center;padding:16px 0;">Could not load GIFs. Check connection.</div>';
+  }
 }
 
 // =================== LIGHTBOX ===================
