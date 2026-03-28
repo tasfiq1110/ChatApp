@@ -102,10 +102,7 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--tx);
 .sys{text-align:center;font-size:.71rem;color:var(--mu);padding:4px 14px;background:var(--s1);
   border-radius:100px;align-self:center;border:1px solid var(--bd);animation:fi .3s ease;max-width:90%;}
 
-/* Screenshot notification */
-.ss-notice{display:flex;align-items:center;justify-content:center;gap:6px;
-  padding:6px 14px;background:rgba(255,179,71,.1);border:1px solid rgba(255,179,71,.25);
-  border-radius:100px;align-self:center;font-size:.72rem;color:var(--ylw);animation:fi .3s ease;}
+
 
 /* Row */
 .row{display:flex;gap:6px;animation:mi .2s ease;position:relative;}
@@ -268,7 +265,6 @@ body{font-family:'DM Sans',sans-serif;background:var(--bg);color:var(--tx);
     <div class="chip">😂 Reactions</div>
     <div class="chip">✏️ Edit</div>
     <div class="chip">🗑️ Unsend</div>
-    <div class="chip">📸 Screenshot Alert</div>
     <div class="chip">🔞 Content Filter</div>
     <div class="chip">🔒 Auto Delete</div>
   </div>
@@ -471,17 +467,7 @@ socket.on('reaction_updated',({msgId,reactions})=>{
   renderReacts(row,reactions);
 });
 
-// Screenshot notification from partner
-socket.on('partner_screenshot',()=>{
-  const wrap=document.getElementById('msgs');
-  const el=document.createElement('div');
-  el.className='ss-notice';
-  el.innerHTML='📸 <span>'+pN+' took a screenshot</span>';
-  wrap.appendChild(el);
-  wrap.scrollTop=wrap.scrollHeight;
-  toast('📸 '+pN+' took a screenshot','warn');
-  setTimeout(()=>el.remove(),8000);
-});
+
 
 // ══════════════════════════════════════════════════════
 //  UI
@@ -804,47 +790,7 @@ function toast(msg,type){
   clearTimeout(toastTmr);toastTmr=setTimeout(()=>t.classList.remove('show'),3500);
 }
 
-// ══════════════════════════════════════════════════════
-//  SCREENSHOT DETECTION (after socket is defined)
-// ══════════════════════════════════════════════════════
-function notifyScreenshot() {
-  if (!paired) return;
-  socket.emit('screenshot_taken');
-  toast('📸 Your partner was notified of your screenshot');
-}
 
-// Desktop: PrintScreen key
-document.addEventListener('keyup', e => {
-  if (e.key === 'PrintScreen' || e.key === 'Print' || e.keyCode === 44) {
-    notifyScreenshot();
-  }
-});
-
-// Android/Mobile: visibility change trick
-// When user presses home/recents/notification bar to screenshot, page briefly hides
-let ssHideTime = 0;
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    ssHideTime = Date.now();
-  } else {
-    const hiddenFor = Date.now() - ssHideTime;
-    // If page was hidden for less than 2 seconds while chatting, likely a screenshot
-    if (ssHideTime > 0 && hiddenFor < 2000 && paired) {
-      notifyScreenshot();
-    }
-    ssHideTime = 0;
-  }
-});
-
-// Page focus/blur (works on some browsers for screenshot detection)
-window.addEventListener('blur', () => { ssHideTime = Date.now(); });
-window.addEventListener('focus', () => {
-  const hiddenFor = Date.now() - ssHideTime;
-  if (ssHideTime > 0 && hiddenFor < 2000 && paired) {
-    notifyScreenshot();
-  }
-  ssHideTime = 0;
-});
 // ══════════════════════════════════════════════════════
 //  MISC
 // ══════════════════════════════════════════════════════
