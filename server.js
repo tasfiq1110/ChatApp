@@ -656,4 +656,4 @@ io.on('connection', socket => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Zapp running on ${PORT}`));
+server.listen(PORT, () => console.log(`Hello Chat running on ${PORT}`));
