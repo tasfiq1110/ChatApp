@@ -1,61 +1,56 @@
 const express = require('express');
-const http = require('http');
+const http    = require('http');
 const { Server } = require('socket.io');
-const path = require('path');
+const path   = require('path');
 const multer = require('multer');
-const fs = require('fs');
+const fs     = require('fs');
 const { v4: uuidv4 } = require('uuid');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+const io     = new Server(server, {
+  cors: { origin: '*', methods: ['GET','POST'] },
   maxHttpBufferSize: 50 * 1024 * 1024,
   transports: ['websocket', 'polling'],
   allowEIO3: true,
-  pingTimeout: 60000,
+  pingTimeout:  90000,  // 90s — handles mobile network gaps
   pingInterval: 25000
 });
 
+// Keep Render alive
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) setInterval(() => fetch(RENDER_URL).catch(() => {}), 14 * 60 * 1000);
 
-// ── Constants ─────────────────────────────────────────
-const GRACE_PERIOD   = 30000; // ms to wait for reconnect before ending the session
-const MSG_LIMIT      = 5;
-const MSG_WINDOW     = 2000;
+// ─── Config ────────────────────────────────────────────
+const GRACE_MS = 40000; // how long we keep session alive after disconnect
+const RATE_MAX = 5;     // messages per window
+const RATE_WIN = 2000;  // window ms
 
-// ── State ─────────────────────────────────────────────
-const interestQueues = new Map(); // interest -> socketId[]
-const globalQueue    = [];
-const interestTimers = new Map(); // socketId -> timeoutId
+// ─── State ─────────────────────────────────────────────
+// Everything keyed by stable sessionId — survives reconnects
+const sessions    = new Map(); // sessionId → sess object
+const sockToSess  = new Map(); // socketId  → sessionId (updated on reconnect)
 
-// Active pairs use socket IDs (changes on reconnect)
-const activePairs    = new Map(); // socketId -> partnerId (current socket)
-const userRooms      = new Map(); // socketId -> roomId
+// Queues store sessionIds (stable)
+const globalQ    = [];
+const interestQs = new Map(); // interest → sessionId[]
 
-// Session data — keyed by SESSION TOKEN, survives reconnects
-// { name, country, interests, warnings, partnerId (session), roomId, messages }
-const sessions       = new Map(); // sessionToken -> sessionData
-const tokenToSocket  = new Map(); // sessionToken -> current socketId
-const socketToToken  = new Map(); // socketId -> sessionToken
+// Timers
+const graceTmrs  = new Map(); // sessionId → timeout (grace period)
+const fallTmrs   = new Map(); // sessionId → timeout (interest→global fallback)
+const rateLimits = new Map(); // sessionId → {count, resetAt}
 
-// Grace period: when a user disconnects, we keep their session for GRACE_PERIOD ms
-const graceTimers    = new Map(); // sessionToken -> timeoutId
-// When a user is in grace period, partner is put in "waiting" state
-const waitingFor     = new Map(); // partnerSessionToken -> partnerSocketId (who is waiting)
-
-const msgRates       = new Map(); // socketId -> {count, resetAt}
-
-// ── File uploads ─────────────────────────────────────
+// ─── Uploads ───────────────────────────────────────────
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const storage = multer.diskStorage({
-  destination: UPLOAD_DIR,
-  filename: (req, file, cb) => cb(null, uuidv4() + path.extname(file.originalname))
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: UPLOAD_DIR,
+    filename: (req, file, cb) => cb(null, uuidv4() + path.extname(file.originalname))
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 
 app.use(express.json());
 app.use('/uploads', express.static(UPLOAD_DIR));
@@ -63,463 +58,374 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/country', async (req, res) => {
   try {
-    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:','');
-    const r = await fetch(`http://ip-api.com/json/${ip}?fields=country,countryCode`, { signal: AbortSignal.timeout(3000) });
-    const d = await r.json();
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:', '');
+    const r  = await fetch(`http://ip-api.com/json/${ip}?fields=country,countryCode`, { signal: AbortSignal.timeout(3000) });
+    const d  = await r.json();
     if (d.countryCode) {
       const flag = d.countryCode.toUpperCase().split('').map(c => String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65)).join('');
-      res.json({ country: d.country, code: d.countryCode, flag });
-    } else res.json({ country:'', code:'', flag:'' });
-  } catch { res.json({ country:'', code:'', flag:'' }); }
+      return res.json({ country: d.country, code: d.countryCode, flag });
+    }
+  } catch {}
+  res.json({ country: '', code: '', flag: '' });
 });
 
 app.post('/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error:'No file' });
-  res.json({ url:`/uploads/${req.file.filename}`, filename:req.file.filename, mimetype:req.file.mimetype });
+  if (!req.file) return res.status(400).json({ error: 'No file' });
+  res.json({ url: `/uploads/${req.file.filename}`, filename: req.file.filename, mimetype: req.file.mimetype });
 });
 
-// ── Name generator ────────────────────────────────────
-const adj   = ['Swift','Cosmic','Neon','Silent','Wild','Vivid','Lunar','Mystic','Pixel','Frosted','Electric','Amber','Crystal','Shadow','Velvet'];
-const nouns = ['Fox','Panda','Wolf','Eagle','Comet','Nova','Drift','Spark','Blaze','Storm','Raven','Tiger','Lynx','Hawk','Orca'];
-function randomName() { return adj[Math.floor(Math.random()*adj.length)] + nouns[Math.floor(Math.random()*nouns.length)] + Math.floor(Math.random()*99+1); }
-function getRoomId(a, b) { return [a,b].sort().join('::'); }
+// ─── Helpers ───────────────────────────────────────────
+const ADJ   = ['Swift','Cosmic','Neon','Silent','Wild','Vivid','Lunar','Mystic','Pixel','Frosted','Electric','Amber','Crystal','Shadow','Velvet'];
+const NOUNS = ['Fox','Panda','Wolf','Eagle','Comet','Nova','Drift','Spark','Blaze','Storm','Raven','Tiger','Lynx','Hawk','Orca'];
+const randName = () => ADJ[Math.floor(Math.random()*ADJ.length)] + NOUNS[Math.floor(Math.random()*NOUNS.length)] + (Math.floor(Math.random()*99)+1);
 
-// ── Queue helpers ─────────────────────────────────────
-function removeFromAllQueues(socketId) {
-  for (let i=globalQueue.length-1; i>=0; i--) if (globalQueue[i]===socketId) globalQueue.splice(i,1);
-  for (const [,q] of interestQueues) for (let i=q.length-1; i>=0; i--) if (q[i]===socketId) q.splice(i,1);
-  if (interestTimers.has(socketId)) { clearTimeout(interestTimers.get(socketId)); interestTimers.delete(socketId); }
-}
-function cleanArr(arr) {
-  for (let i=arr.length-1; i>=0; i--) if (!io.sockets.sockets.get(arr[i])) arr.splice(i,1);
+// Get live socket object for a session
+function getSock(sessId) {
+  const s = sessions.get(sessId);
+  if (!s || !s.sockId) return null;
+  return io.sockets.sockets.get(s.sockId) || null;
 }
 
-// ── Session helpers ───────────────────────────────────
-function getSession(token) { return sessions.get(token); }
-function getSocketId(token) { return tokenToSocket.get(token); }
-function getToken(socketId) { return socketToToken.get(socketId); }
+// Emit to a session (by sessionId)
+function emitTo(sessId, event, data) {
+  const sock = getSock(sessId);
+  if (sock) sock.emit(event, data);
+}
 
-function endSession(token) {
-  const sess = sessions.get(token);
-  if (!sess) return;
+// Remove sessionId from all queues and cancel fallback timer
+function dequeue(sessId) {
+  for (let i = globalQ.length - 1; i >= 0; i--)
+    if (globalQ[i] === sessId) globalQ.splice(i, 1);
+  for (const q of interestQs.values())
+    for (let i = q.length - 1; i >= 0; i--)
+      if (q[i] === sessId) q.splice(i, 1);
+  const t = fallTmrs.get(sessId);
+  if (t) { clearTimeout(t); fallTmrs.delete(sessId); }
+}
 
-  // Delete uploaded files from this session's messages
-  if (sess.roomId) {
-    const msgs = sess.messages || [];
-    msgs.forEach(m => {
-      if (m.filename) { const fp=path.join(UPLOAD_DIR,m.filename); if(fs.existsSync(fp)) fs.unlink(fp,()=>{}); }
-    });
+// Remove dead sessions from a queue array
+function pruneQ(arr) {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const alive = sessions.has(arr[i]) && getSock(arr[i]);
+    if (!alive) arr.splice(i, 1);
   }
-
-  // Clean up partner linkage
-  if (sess.partnerToken) {
-    const partnerSess = sessions.get(sess.partnerToken);
-    if (partnerSess) partnerSess.partnerToken = null;
-  }
-
-  sessions.delete(token);
-  const sid = tokenToSocket.get(token);
-  if (sid) { socketToToken.delete(sid); tokenToSocket.delete(token); }
-  activePairs.delete(tokenToSocket.get(token));
-  waitingFor.delete(token);
 }
 
-// ── Pair connection using sessions ────────────────────
-function connectPair(sockA, sessA, sockB, sessB) {
-  const roomId = getRoomId(sessA.token, sessB.token);
-
-  // Link sessions to each other
-  sessA.partnerToken = sessB.token;
-  sessB.partnerToken = sessA.token;
-  sessA.roomId = roomId;
-  sessB.roomId = roomId;
-  sessA.messages = [];
-  sessB.messages = sessA.messages; // shared reference
-
-  // Link socket IDs
-  activePairs.set(sockA.id, sockB.id);
-  activePairs.set(sockB.id, sockA.id);
-  userRooms.set(sockA.id, roomId);
-  userRooms.set(sockB.id, roomId);
-
-  sockA.join(roomId); sockB.join(roomId);
-
-  const shared = (sessA.interests||[]).filter(t => (sessB.interests||[]).includes(t));
-
-  sockA.emit('connected', { partnerName:sessB.name, myName:sessA.name, partnerCountry:sessB.country||{}, sharedInterests:shared });
-  sockB.emit('connected', { partnerName:sessA.name, myName:sessB.name, partnerCountry:sessA.country||{}, sharedInterests:shared });
+// Cleanly break a pair
+function breakPair(sessId) {
+  const s = sessions.get(sessId);
+  if (!s || !s.partnerId) return;
+  const p = sessions.get(s.partnerId);
+  // Delete uploaded files
+  for (const m of (s.messages || []))
+    if (m.filename) { try { fs.unlinkSync(path.join(UPLOAD_DIR, m.filename)); } catch {} }
+  if (p) { p.partnerId = null; p.roomId = null; p.messages = []; }
+  s.partnerId = null; s.roomId = null; s.messages = [];
 }
 
-// ── Matchmaking ───────────────────────────────────────
-function matchWithInterests(socket) {
-  removeFromAllQueues(socket.id);
-  cleanArr(globalQueue);
+// Connect two sessions
+function joinPair(sA, sB) {
+  const roomId = [sA.sessId, sB.sessId].sort().join('::');
+  const msgs   = [];
+  sA.partnerId = sB.sessId; sB.partnerId = sA.sessId;
+  sA.roomId    = roomId;    sB.roomId    = roomId;
+  sA.messages  = msgs;      sB.messages  = msgs;
+  const sockA = getSock(sA.sessId), sockB = getSock(sB.sessId);
+  if (sockA) sockA.join(roomId);
+  if (sockB) sockB.join(roomId);
+  const shared = (sA.interests || []).filter(t => (sB.interests || []).includes(t));
+  if (sockA) sockA.emit('connected', { partnerName: sB.name, myName: sA.name, partnerCountry: sB.country || {}, sharedInterests: shared });
+  if (sockB) sockB.emit('connected', { partnerName: sA.name, myName: sB.name, partnerCountry: sA.country || {}, sharedInterests: shared });
+}
 
-  const sess = getSession(getToken(socket.id));
-  const myInterests = sess?.interests || [];
+// ─── Matchmaking ────────────────────────────────────────
+function findMatch(sessId) {
+  dequeue(sessId);
+  const s = sessions.get(sessId);
+  if (!s || !getSock(sessId)) return; // not connected, abort
 
-  if (myInterests.length > 0) {
-    for (const interest of myInterests) {
-      const q = interestQueues.get(interest) || [];
-      cleanArr(q);
-      while (q.length > 0) {
-        const pid = q.shift();
-        if (pid === socket.id) continue;
-        const ps = io.sockets.sockets.get(pid);
-        if (!ps) continue;
-        const pSess = getSession(getToken(pid));
-        if (!pSess) continue;
-        removeFromAllQueues(pid);
-        connectPair(socket, sess, ps, pSess);
+  const interests = s.interests || [];
+
+  if (interests.length > 0) {
+    // Scan interest queues for a compatible match
+    for (const interest of interests) {
+      const q = interestQs.get(interest) || [];
+      pruneQ(q);
+      for (let i = 0; i < q.length; i++) {
+        const cid = q[i];
+        if (cid === sessId) continue;
+        if (!sessions.has(cid) || !getSock(cid)) continue;
+        // Match found — remove from queues and connect
+        q.splice(i, 1);
+        dequeue(cid);
+        joinPair(s, sessions.get(cid));
         return;
       }
     }
-    for (const interest of myInterests) {
-      if (!interestQueues.has(interest)) interestQueues.set(interest, []);
-      interestQueues.get(interest).push(socket.id);
+    // No match yet — add to interest queues and wait up to 5s then go global
+    for (const interest of interests) {
+      if (!interestQs.has(interest)) interestQs.set(interest, []);
+      const q = interestQs.get(interest);
+      if (!q.includes(sessId)) q.push(sessId);
     }
-    socket.emit('searching', { mode:'interest', timeout:5 });
-    const timer = setTimeout(() => { removeFromAllQueues(socket.id); matchGlobal(socket); }, 5000);
-    interestTimers.set(socket.id, timer);
+    emitTo(sessId, 'searching', { mode: 'interest', timeout: 5 });
+    fallTmrs.set(sessId, setTimeout(() => {
+      fallTmrs.delete(sessId);
+      findMatchGlobal(sessId);
+    }, 5000));
     return;
   }
-  matchGlobal(socket);
+
+  findMatchGlobal(sessId);
 }
 
-function matchGlobal(socket) {
-  removeFromAllQueues(socket.id);
-  cleanArr(globalQueue);
-  const sess = getSession(getToken(socket.id));
-
-  while (globalQueue.length > 0) {
-    const pid = globalQueue.shift();
-    if (pid === socket.id) continue;
-    const ps = io.sockets.sockets.get(pid);
-    if (!ps) continue;
-    const pSess = getSession(getToken(pid));
-    if (!pSess) continue;
-    removeFromAllQueues(pid);
-    connectPair(socket, sess, ps, pSess);
+function findMatchGlobal(sessId) {
+  dequeue(sessId);
+  const s = sessions.get(sessId);
+  if (!s || !getSock(sessId)) return;
+  pruneQ(globalQ);
+  for (let i = 0; i < globalQ.length; i++) {
+    const cid = globalQ[i];
+    if (cid === sessId) continue;
+    if (!sessions.has(cid) || !getSock(cid)) continue;
+    globalQ.splice(i, 1);
+    dequeue(cid);
+    joinPair(s, sessions.get(cid));
     return;
   }
-  globalQueue.push(socket.id);
-  socket.emit('searching', { mode:'global' });
+  globalQ.push(sessId);
+  emitTo(sessId, 'searching', { mode: 'global' });
 }
 
-// ── Rate limiting ─────────────────────────────────────
-function isRateLimited(socketId) {
+// ─── Rate limit ─────────────────────────────────────────
+function rateOk(sessId) {
   const now = Date.now();
-  const r = msgRates.get(socketId) || { count:0, resetAt:now+MSG_WINDOW };
-  if (now > r.resetAt) { r.count=0; r.resetAt=now+MSG_WINDOW; }
+  const r   = rateLimits.get(sessId) || { count: 0, resetAt: now + RATE_WIN };
+  if (now > r.resetAt) { r.count = 0; r.resetAt = now + RATE_WIN; }
   r.count++;
-  msgRates.set(socketId, r);
-  return r.count > MSG_LIMIT;
+  rateLimits.set(sessId, r);
+  return r.count <= RATE_MAX;
 }
 
-// ── Profanity ─────────────────────────────────────────
-const BAD_WORDS = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
-function checkBadWords(t) { const n=t.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s'); return BAD_WORDS.some(w=>n.includes(w)); }
-function censorText(t) { let r=t; BAD_WORDS.forEach(w=>{const re=new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');r=r.replace(re,m=>m[0]+'*'.repeat(Math.max(m.length-2,1))+(m.length>1?m[m.length-1]:''));}); return r; }
+// ─── Profanity ──────────────────────────────────────────
+const BAD = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
+const hasBad = t => { const n=t.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s'); return BAD.some(w=>n.includes(w)); };
+const censor  = t => { let r=t; BAD.forEach(w=>{const re=new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'gi');r=r.replace(re,m=>m[0]+'*'.repeat(Math.max(m.length-2,1))+(m.length>1?m[m.length-1]:''));}); return r; };
 
-// ── Socket.IO ─────────────────────────────────────────
-io.on('connection', (socket) => {
+// ─── Socket.IO ──────────────────────────────────────────
+io.on('connection', socket => {
 
-  // Client sends their session token on every connection
-  // If no token exists, a new session is created
-  socket.on('init_session', (token) => {
-    let sess;
-    let isReconnect = false;
+  // ── INIT ──────────────────────────────────────────────
+  // Client sends this immediately on every connect/reconnect.
+  // Contains sessionId (null if new), plus current country+interests.
+  // Handling everything in ONE event eliminates all ordering race conditions.
+  socket.on('init', ({ sessId: clientSessId, country, interests }) => {
+    let s;
 
-    if (token && sessions.has(token)) {
-      // ─ RECONNECT: existing session found ─
-      sess = sessions.get(token);
-      isReconnect = true;
+    if (clientSessId && sessions.has(clientSessId)) {
+      // ── RECONNECT ──────────────────────────────────────
+      s = sessions.get(clientSessId);
 
-      // Cancel the grace period timer — they made it back in time
-      if (graceTimers.has(token)) {
-        clearTimeout(graceTimers.get(token));
-        graceTimers.delete(token);
-      }
+      // Cancel grace timer — they're back
+      const gt = graceTmrs.get(clientSessId);
+      if (gt) { clearTimeout(gt); graceTmrs.delete(clientSessId); }
 
       // Update socket mapping
-      const oldSocketId = tokenToSocket.get(token);
-      if (oldSocketId) {
-        socketToToken.delete(oldSocketId);
-        activePairs.delete(oldSocketId);
-        userRooms.delete(oldSocketId);
-      }
-      tokenToSocket.set(token, socket.id);
-      socketToToken.set(socket.id, token);
+      if (s.sockId && s.sockId !== socket.id) sockToSess.delete(s.sockId);
+      s.sockId = socket.id;
+      sockToSess.set(socket.id, clientSessId);
 
-      // Send back their name etc
-      socket.emit('assigned_name', sess.name);
-      socket.emit('session_restored', { name: sess.name });
+      // Update profile
+      if (country && (country.code || country.flag)) s.country = country;
+      if (Array.isArray(interests) && interests.length) s.interests = interests.slice(0, 5);
 
-      // Check if they were in a chat
-      if (sess.partnerToken && sessions.has(sess.partnerToken)) {
-        const partnerSess = sessions.get(sess.partnerToken);
-        const partnerSocketId = tokenToSocket.get(sess.partnerToken);
-        const partnerSocket = partnerSocketId ? io.sockets.sockets.get(partnerSocketId) : null;
+      // Rejoin room
+      if (s.roomId) socket.join(s.roomId);
 
-        if (partnerSocket) {
-          // Partner is online — restore the room
-          const roomId = sess.roomId;
-          activePairs.set(socket.id, partnerSocket.id);
-          activePairs.set(partnerSocket.id, socket.id);
-          userRooms.set(socket.id, roomId);
-          userRooms.set(partnerSocket.id, roomId);
-          socket.join(roomId);
+      // Confirm session restored
+      socket.emit('init_ok', { sessId: clientSessId, name: s.name });
 
-          // Send all missed messages to the reconnecting user
-          const messages = sess.messages || [];
+      // Handle partner state
+      if (s.partnerId && sessions.has(s.partnerId)) {
+        const p     = sessions.get(s.partnerId);
+        const pSock = getSock(s.partnerId);
+
+        if (pSock) {
+          // Partner online — restore immediately
           socket.emit('chat_restored', {
-            partnerName: partnerSess.name,
-            myName: sess.name,
-            partnerCountry: partnerSess.country || {},
-            messages: messages
+            partnerName: p.name, myName: s.name,
+            partnerCountry: p.country || {},
+            messages: (s.messages || []).map(m => ({ ...m, isMe: m.sessId === clientSessId }))
           });
-
-          // Tell partner they're back
-          partnerSocket.emit('partner_reconnected', { partnerName: sess.name });
-
-          // Remove partner from waiting state
-          waitingFor.delete(sess.partnerToken);
+          pSock.emit('partner_reconnected', { partnerName: s.name });
+        } else if (graceTmrs.has(s.partnerId)) {
+          // Partner also dropped, still in grace — show their messages, wait
+          socket.emit('chat_restored', {
+            partnerName: p.name, myName: s.name,
+            partnerCountry: p.country || {},
+            messages: (s.messages || []).map(m => ({ ...m, isMe: m.sessId === clientSessId }))
+          });
+          socket.emit('partner_reconnecting');
         } else {
-          // Partner is also disconnected (both lost connection)
-          // Check if partner is still in grace period
-          if (graceTimers.has(sess.partnerToken)) {
-            // Partner hasn't given up yet — wait for them
-            socket.emit('chat_restored', {
-              partnerName: partnerSess.name,
-              myName: sess.name,
-              partnerCountry: partnerSess.country || {},
-              messages: sess.messages || []
-            });
-            socket.emit('partner_reconnecting'); // show "partner reconnecting..." state
-            waitingFor.set(sess.partnerToken, socket.id);
-          } else {
-            // Partner's grace period expired — they gave up
-            sess.partnerToken = null;
-            sess.roomId = null;
-            sess.messages = [];
-            socket.emit('partner_gave_up');
-          }
+          // Partner's grace expired — they're gone
+          s.partnerId = null; s.roomId = null; s.messages = [];
+          socket.emit('partner_gave_up');
         }
-      } else {
-        // Was not in a chat — just restore name
-        sess.partnerToken = null;
       }
+      // else: not in a chat, just init_ok is fine
 
     } else {
-      // ─ NEW SESSION ─
-      const newToken = uuidv4();
-      sess = {
-        token: newToken,
-        name: randomName(),
-        country: null,
-        interests: [],
-        warnings: 0,
-        partnerToken: null,
-        roomId: null,
-        messages: []
+      // ── NEW SESSION ────────────────────────────────────
+      const newId = uuidv4();
+      s = {
+        sessId: newId, name: randName(),
+        country:   (country && (country.code || country.flag)) ? country : null,
+        interests: Array.isArray(interests) ? interests.slice(0, 5) : [],
+        warnings: 0, partnerId: null, roomId: null, messages: [], sockId: socket.id
       };
-      sessions.set(newToken, sess);
-      tokenToSocket.set(newToken, socket.id);
-      socketToToken.set(socket.id, newToken);
-
-      socket.emit('assigned_name', sess.name);
-      socket.emit('session_token', newToken); // client stores this in localStorage
+      sessions.set(newId, s);
+      sockToSess.set(socket.id, newId);
+      socket.emit('init_ok', { sessId: newId, name: s.name });
     }
   });
 
-  socket.on('set_country',   (d) => { const s=getSession(getToken(socket.id)); if(s) s.country=d; });
-  socket.on('set_interests', (d) => { const s=getSession(getToken(socket.id)); if(s) s.interests=Array.isArray(d)?d.slice(0,5):[]; });
+  // ── PROFILE UPDATES ───────────────────────────────────
+  socket.on('set_country', d => {
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (s && d) s.country = d;
+  });
+  socket.on('set_interests', arr => {
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (s) s.interests = Array.isArray(arr) ? arr.slice(0, 5) : [];
+  });
 
+  // ── FIND PARTNER ──────────────────────────────────────
   socket.on('find_partner', () => {
-    const token = getToken(socket.id);
-    const sess = getSession(token);
-    if (!sess) return;
-    // End any existing chat
-    if (sess.partnerToken) {
-      const pSess = sessions.get(sess.partnerToken);
-      const pSid  = tokenToSocket.get(sess.partnerToken);
-      if (pSid) io.to(pSid).emit('partner_left');
-      if (pSess) { pSess.partnerToken=null; pSess.roomId=null; }
-      sess.partnerToken=null; sess.roomId=null; sess.messages=[];
-    }
-    const oldSid = socket.id;
-    activePairs.delete(oldSid);
-    const oldRoom = userRooms.get(oldSid);
-    if (oldRoom) socket.leave(oldRoom);
-    userRooms.delete(oldSid);
-    matchWithInterests(socket);
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s) return;
+    if (s.partnerId) { emitTo(s.partnerId, 'partner_left'); breakPair(s.sessId); }
+    dequeue(s.sessId);
+    if (s.roomId) { socket.leave(s.roomId); s.roomId = null; }
+    findMatch(s.sessId);
   });
 
   socket.on('skip', () => {
-    const token = getToken(socket.id);
-    const sess = getSession(token);
-    if (!sess) return;
-    if (sess.partnerToken) {
-      const pSid = tokenToSocket.get(sess.partnerToken);
-      if (pSid) io.to(pSid).emit('partner_left');
-      const pSess = sessions.get(sess.partnerToken);
-      if (pSess) { pSess.partnerToken=null; pSess.roomId=null; }
-      sess.partnerToken=null; sess.roomId=null; sess.messages=[];
-    }
-    activePairs.delete(socket.id);
-    const oldRoom = userRooms.get(socket.id);
-    if (oldRoom) socket.leave(oldRoom);
-    userRooms.delete(socket.id);
-    matchWithInterests(socket);
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s) return;
+    if (s.partnerId) { emitTo(s.partnerId, 'partner_left'); breakPair(s.sessId); }
+    dequeue(s.sessId);
+    if (s.roomId) { socket.leave(s.roomId); s.roomId = null; }
+    findMatch(s.sessId);
   });
 
   socket.on('end_chat', () => {
-    const token = getToken(socket.id);
-    const sess = getSession(token);
-    if (sess) {
-      if (sess.partnerToken) {
-        const pSid = tokenToSocket.get(sess.partnerToken);
-        if (pSid) io.to(pSid).emit('partner_left');
-        const pSess = sessions.get(sess.partnerToken);
-        if (pSess) { pSess.partnerToken=null; pSess.roomId=null; pSess.messages=[]; }
-        sess.partnerToken=null; sess.roomId=null; sess.messages=[];
-      }
-    }
-    removeFromAllQueues(socket.id);
-    activePairs.delete(socket.id);
-    userRooms.delete(socket.id);
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s) return;
+    if (s.partnerId) { emitTo(s.partnerId, 'partner_left'); breakPair(s.sessId); }
+    dequeue(s.sessId);
+    if (s.roomId) { socket.leave(s.roomId); s.roomId = null; }
     socket.emit('chat_ended');
   });
 
-  socket.on('send_message', (data) => {
-    const token = getToken(socket.id);
-    const sess  = getSession(token);
-    if (!sess || !sess.partnerToken) return;
-    if (isRateLimited(socket.id)) { socket.emit('rate_limited'); return; }
-
-    const roomId = sess.roomId;
-    if (!roomId) return;
-
-    if (data.type==='text' && data.text) {
-      if (checkBadWords(data.text)) {
-        sess.warnings = (sess.warnings||0)+1;
-        socket.emit('content_warning', { warns:sess.warnings, max:3 });
-        if (sess.warnings>=3) { socket.emit('banned'); setTimeout(()=>socket.disconnect(),1000); return; }
-        data.text = censorText(data.text);
+  // ── MESSAGES ──────────────────────────────────────────
+  socket.on('send_message', data => {
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s || !s.partnerId || !s.roomId) return;
+    if (!rateOk(s.sessId)) { socket.emit('rate_limited'); return; }
+    if (data.type === 'text' && data.text) {
+      if (hasBad(data.text)) {
+        s.warnings++;
+        socket.emit('content_warning', { warns: s.warnings, max: 3 });
+        if (s.warnings >= 3) { socket.emit('banned'); setTimeout(() => socket.disconnect(), 500); return; }
+        data.text = censor(data.text);
       }
     }
-
     const msg = {
-      id:uuidv4(), from:token, // use token as sender ID (stable across reconnects)
-      type:data.type||'text', text:data.text||'',
-      url:data.url||null, filename:data.filename||null, mimetype:data.mimetype||null,
-      gif:data.gif||null, reactions:{},
-      replyTo:data.replyTo||null,
-      timestamp:Date.now(), read:false
+      id: uuidv4(),
+      sessId: s.sessId, // used by client for isMe detection
+      type: data.type || 'text', text: data.text || '',
+      url: data.url || null, filename: data.filename || null,
+      mimetype: data.mimetype || null, gif: data.gif || null,
+      reactions: {}, replyTo: data.replyTo || null,
+      timestamp: Date.now()
     };
-
-    // Store in session (survives reconnect)
-    if (!sess.messages) sess.messages = [];
-    sess.messages.push(msg);
-
-    // Emit to the room — but use socket ID for isMe check compatibility
-    // Add sender socket id for client-side isMe detection
-    const msgToSend = { ...msg, fromSocket: socket.id };
-    io.to(roomId).emit('new_message', msgToSend);
+    s.messages.push(msg);
+    io.to(s.roomId).emit('new_message', msg);
   });
 
-  socket.on('typing', (v) => {
-    const p = activePairs.get(socket.id);
-    if (p) io.to(p).emit('partner_typing', v);
+  socket.on('typing', v => {
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (s?.partnerId) emitTo(s.partnerId, 'partner_typing', v);
   });
 
   socket.on('messages_read', () => {
-    const token = getToken(socket.id);
-    const sess  = getSession(token);
-    if (!sess?.messages) return;
-    sess.messages.forEach(m => { if(m.from!==token) m.read=true; });
-    const p = activePairs.get(socket.id);
-    if (p) io.to(p).emit('partner_read');
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s?.messages) return;
+    s.messages.forEach(m => { if (m.sessId !== s.sessId) m.read = true; });
+    emitTo(s.partnerId, 'partner_read');
   });
 
   socket.on('unsend_message', ({ msgId }) => {
-    const token = getToken(socket.id);
-    const sess  = getSession(token);
-    if (!sess?.messages) return;
-    const msg = sess.messages.find(m=>m.id===msgId && m.from===token);
-    if (!msg) return;
-    if (msg.filename) { const fp=path.join(UPLOAD_DIR,msg.filename); if(fs.existsSync(fp)) fs.unlink(fp,()=>{}); }
-    msg.unsent=true; msg.text=''; msg.url=null; msg.gif=null;
-    io.to(sess.roomId).emit('message_unsent', { msgId });
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s?.messages || !s.roomId) return;
+    const m = s.messages.find(m => m.id === msgId && m.sessId === s.sessId);
+    if (!m) return;
+    if (m.filename) try { fs.unlinkSync(path.join(UPLOAD_DIR, m.filename)); } catch {}
+    m.unsent = true; m.text = ''; m.url = null; m.gif = null;
+    io.to(s.roomId).emit('message_unsent', { msgId });
   });
 
   socket.on('edit_message', ({ msgId, newText }) => {
-    const token = getToken(socket.id);
-    const sess  = getSession(token);
-    if (!sess?.messages || !newText?.trim()) return;
-    const msg = sess.messages.find(m=>m.id===msgId && m.from===token && m.type==='text' && !m.unsent);
-    if (!msg) return;
-    if (checkBadWords(newText)) { sess.warnings=(sess.warnings||0)+1; socket.emit('content_warning',{warns:sess.warnings,max:3}); return; }
-    msg.text=newText; msg.edited=true;
-    io.to(sess.roomId).emit('message_edited', { msgId, newText });
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s?.messages || !newText?.trim() || !s.roomId) return;
+    const m = s.messages.find(m => m.id === msgId && m.sessId === s.sessId && m.type === 'text' && !m.unsent);
+    if (!m) return;
+    if (hasBad(newText)) { s.warnings++; socket.emit('content_warning', { warns: s.warnings, max: 3 }); return; }
+    m.text = newText; m.edited = true;
+    io.to(s.roomId).emit('message_edited', { msgId, newText });
   });
 
   socket.on('add_reaction', ({ msgId, emoji }) => {
-    const token = getToken(socket.id);
-    const sess  = getSession(token);
-    if (!sess?.messages) return;
-    const msg = sess.messages.find(m=>m.id===msgId); if(!msg) return;
-    if (!msg.reactions) msg.reactions={};
-    if (!msg.reactions[emoji]) msg.reactions[emoji]=[];
-    const idx = msg.reactions[emoji].indexOf(token);
-    if (idx>-1) msg.reactions[emoji].splice(idx,1); else msg.reactions[emoji].push(token);
-    if (!msg.reactions[emoji].length) delete msg.reactions[emoji];
-    io.to(sess.roomId).emit('reaction_updated', { msgId, reactions:msg.reactions });
+    const s = sessions.get(sockToSess.get(socket.id));
+    if (!s?.messages || !s.roomId) return;
+    const m = s.messages.find(m => m.id === msgId);
+    if (!m) return;
+    if (!m.reactions[emoji]) m.reactions[emoji] = [];
+    const idx = m.reactions[emoji].indexOf(s.sessId);
+    if (idx > -1) m.reactions[emoji].splice(idx, 1);
+    else m.reactions[emoji].push(s.sessId);
+    if (!m.reactions[emoji].length) delete m.reactions[emoji];
+    io.to(s.roomId).emit('reaction_updated', { msgId, reactions: m.reactions });
   });
 
+  // ── DISCONNECT ────────────────────────────────────────
   socket.on('disconnect', () => {
-    const token = getToken(socket.id);
-    removeFromAllQueues(socket.id);
-    activePairs.delete(socket.id);
-    msgRates.delete(socket.id);
+    const sessId = sockToSess.get(socket.id);
+    sockToSess.delete(socket.id);
+    dequeue(sessId);
+    rateLimits.delete(sessId);
+    if (!sessId) return;
+    const s = sessions.get(sessId);
+    if (!s) return;
+    s.sockId = null;
 
-    if (!token) return;
-    const sess = getSession(token);
-    if (!sess) return;
-
-    // Don't delete the session immediately — start grace period
-    // During grace period the user can reconnect and resume their chat
-    if (sess.partnerToken) {
-      // Notify partner that this user lost connection
-      const pSid = tokenToSocket.get(sess.partnerToken);
-      if (pSid) {
-        io.to(pSid).emit('partner_disconnected', {
-          graceSeconds: Math.floor(GRACE_PERIOD / 1000)
-        });
-        // Track that partner is waiting for this token to reconnect
-        waitingFor.set(token, pSid);
-      }
+    if (s.partnerId) {
+      // Tell partner, show countdown
+      emitTo(s.partnerId, 'partner_disconnected', { graceSeconds: Math.floor(GRACE_MS / 1000) });
+      // Keep session alive for grace period
+      graceTmrs.set(sessId, setTimeout(() => {
+        graceTmrs.delete(sessId);
+        const sv = sessions.get(sessId);
+        if (!sv) return;
+        emitTo(sv.partnerId, 'partner_left');
+        breakPair(sessId);
+        sessions.delete(sessId);
+      }, GRACE_MS));
+    } else {
+      sessions.delete(sessId);
     }
-
-    // Start grace period timer
-    const timer = setTimeout(() => {
-      // Grace period expired — session is dead
-      graceTimers.delete(token);
-      const s = sessions.get(token);
-      if (s) {
-        // Notify partner that user is gone for good
-        const pSid = tokenToSocket.get(s.partnerToken);
-        if (pSid) io.to(pSid).emit('partner_left');
-        endSession(token);
-      }
-    }, GRACE_PERIOD);
-
-    graceTimers.set(token, timer);
-    // Don't delete session data yet — keep it for reconnect
-    tokenToSocket.delete(token); // socket is gone, token mapping cleared
-    socketToToken.delete(socket.id);
   });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`✅ Zapp running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Zapp running on ${PORT}`));
