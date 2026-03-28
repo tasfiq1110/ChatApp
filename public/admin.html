@@ -155,6 +155,8 @@ tr:hover td{background:var(--s2);}
       <div class="nav-item active" onclick="showTab('overview')" id="nav-overview"><span class="nav-icon">📊</span>Overview</div>
       <div class="nav-item" onclick="showTab('users')" id="nav-users"><span class="nav-icon">👥</span>Users</div>
       <div class="nav-item" onclick="showTab('media')" id="nav-media"><span class="nav-icon">🖼️</span>Media</div>
+      <div class="nav-item" onclick="showTab('violations')" id="nav-violations"><span class="nav-icon">⚠️</span>Violations</div>
+      <div class="nav-item" onclick="showTab('ipban')" id="nav-ipban"><span class="nav-icon">🔒</span>IP Bans</div>
       <div class="nav-item" onclick="showTab('banned')" id="nav-banned"><span class="nav-icon">🚫</span>Banned</div>
       <div class="nav-item" onclick="showTab('broadcast')" id="nav-broadcast"><span class="nav-icon">📢</span>Broadcast</div>
       <div class="nav-item" onclick="showTab('analytics')" id="nav-analytics"><span class="nav-icon">📈</span>Analytics</div>
@@ -169,7 +171,7 @@ tr:hover td{background:var(--s2);}
 let TOKEN = localStorage.getItem('zapp_admin_token') || '';
 let currentTab = 'overview';
 let autoRefreshInterval = null;
-let allSessions = [], allMedia = [], statsData = {};
+let allSessions = [], allMedia = [], statsData = {}, allViolations = [], allBannedIPs = [];
 
 // ── Auth ─────────────────────────────────────────────────
 async function doLogin(){
@@ -214,15 +216,18 @@ async function api(method, path, body){
 // ── Load all data ──────────────────────────────────────
 async function loadAll(){
   try{
-    const [s, sess, media] = await Promise.all([
+    const [s, sess, media, violations, bannedIPs] = await Promise.all([
       api('GET','/admin/api/stats'),
       api('GET','/admin/api/sessions'),
-      api('GET','/admin/api/media')
+      api('GET','/admin/api/media'),
+      api('GET','/admin/api/violations'),
+      api('GET','/admin/api/banned-ips')
     ]);
     if(!s) return;
-    statsData = s; allSessions = sess||[]; allMedia = media||[];
+    statsData=s; allSessions=sess||[]; allMedia=media||[];
+    allViolations=violations||[]; allBannedIPs=bannedIPs||[];
     renderTab(currentTab);
-    document.getElementById('liveIndicator').textContent = `● ${s.online} online`;
+    document.getElementById('liveIndicator').textContent=`● ${s.online} online`;
   }catch(e){ showToast('Refresh failed','err'); }
 }
 
@@ -240,6 +245,8 @@ function renderTab(tab){
     case 'overview':   c.innerHTML = renderOverview(); break;
     case 'users':      c.innerHTML = renderUsers(); break;
     case 'media':      c.innerHTML = renderMedia(); break;
+    case 'violations': c.innerHTML = renderViolations(); break;
+    case 'ipban':      c.innerHTML = renderIPBan(); break;
     case 'banned':     c.innerHTML = renderBanned(); break;
     case 'broadcast':  c.innerHTML = renderBroadcast(); break;
     case 'analytics':  c.innerHTML = renderAnalytics(); break;
@@ -259,6 +266,8 @@ function renderOverview(){
     <div class="card"><div class="card-label">Total Messages</div><div class="card-val purple">${(s.totalMessages||0).toLocaleString()}</div><div class="card-sub">All time</div></div>
     <div class="card"><div class="card-label">Total Users</div><div class="card-val blue">${(s.totalUsers||0).toLocaleString()}</div><div class="card-sub">All time</div></div>
     <div class="card"><div class="card-label">Banned</div><div class="card-val red">${s.bannedCount||0}</div><div class="card-sub">Sessions</div></div>
+    <div class="card"><div class="card-label">Banned IPs</div><div class="card-val red">${s.bannedIPCount||0}</div><div class="card-sub">Permanent blocks</div></div>
+    <div class="card"><div class="card-label">Violations</div><div class="card-val yellow">${s.violationCount||0}</div><div class="card-sub">Nudity + bad words</div></div>
     <div class="card"><div class="card-label">Media Files</div><div class="card-val yellow">${(s.mediaFiles||[]).length}</div><div class="card-sub">${fmtBytes((s.mediaFiles||[]).reduce((a,f)=>a+f.size,0))}</div></div>
     <div class="card"><div class="card-label">Sessions</div><div class="card-val gray">${s.totalSessions||0}</div><div class="card-sub">In memory</div></div>
   </div>
@@ -326,6 +335,66 @@ function renderMedia(){
 }
 
 // ── Banned ────────────────────────────────────────────
+// ── Violations ────────────────────────────────────────
+function renderViolations(){
+  const filter = window._vFilter || 'all';
+  const list = filter==='all' ? allViolations : allViolations.filter(v=>v.type===filter);
+  return`
+  <div class="section-title">
+    <span>⚠️ Violations Log (${allViolations.length} total)</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <select onchange="window._vFilter=this.value;renderTab('violations')" style="padding:5px 10px;background:var(--s2);border:1px solid var(--bd);color:var(--tx);border-radius:6px;font-size:.8rem">
+        <option value="all" ${filter==='all'?'selected':''}>All</option>
+        <option value="nudity" ${filter==='nudity'?'selected':''}>🔞 Nudity</option>
+        <option value="badword" ${filter==='badword'?'selected':''}>🤬 Bad Words</option>
+      </select>
+      <button class="act-btn danger" onclick="clearViolations()">🗑 Clear All</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    ${list.length?`<table>
+      <tr><th>Time</th><th>Type</th><th>User</th><th>Country</th><th>IP</th><th>Content</th><th>Actions</th></tr>
+      ${list.map(v=>`<tr>
+        <td style="white-space:nowrap;font-size:.75rem">${new Date(v.ts).toLocaleString()}</td>
+        <td>${v.type==='nudity'?`<span class="badge-pill pill-red">🔞 Nudity</span>`:`<span class="badge-pill pill-yellow">🤬 Bad Word</span>`}</td>
+        <td>${v.flag||''} <strong>${esc(v.name)}</strong></td>
+        <td>${esc(v.country||'—')}</td>
+        <td style="font-family:monospace;font-size:.75rem">${esc(v.ip||'—')}</td>
+        <td style="max-width:200px">
+          ${v.type==='nudity'&&v.url?`<img src="${v.url}" style="height:40px;width:40px;object-fit:cover;border-radius:4px;cursor:pointer" onclick="openImg('${v.url}')" title="${esc(v.filename)}">`:''}
+          ${v.type==='badword'?`<span style="font-size:.78rem;color:var(--mu);word-break:break-all">${esc(v.content?.slice(0,80)||'')}</span>`:''}
+        </td>
+        <td style="display:flex;gap:4px;flex-wrap:wrap">
+          ${v.ip?`<button class="act-btn danger" onclick="banIPFromViolation('${esc(v.ip)}')">🔒 Ban IP</button>`:''}
+          ${v.sessId?`<button class="act-btn danger" onclick="banUser('${v.sessId}','${esc(v.name)}')">🚫 Ban</button>`:''}
+        </td>
+      </tr>`).join('')}
+    </table>`:`<div class="empty">No violations recorded ✓</div>`}
+  </div>`;
+}
+
+// ── IP Bans ───────────────────────────────────────────
+function renderIPBan(){
+  return`
+  <div class="section-title">
+    <span>🔒 Permanently Banned IPs (${allBannedIPs.length})</span>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:16px;align-items:center">
+    <input id="newIPInput" placeholder="Enter IP address to ban…" style="padding:9px 14px;background:var(--s2);border:1px solid var(--bd);border-radius:10px;color:var(--tx);font-size:.875rem;outline:none;flex:1;max-width:320px" onkeydown="if(event.key==='Enter')banIPManual()"/>
+    <button class="act-btn danger" onclick="banIPManual()" style="padding:9px 16px">🔒 Ban IP</button>
+  </div>
+  <div class="tbl-wrap">
+    ${allBannedIPs.length?`<table>
+      <tr><th>IP Address</th><th>Action</th></tr>
+      ${allBannedIPs.map(ip=>`<tr>
+        <td style="font-family:monospace">${esc(ip)}</td>
+        <td><button class="act-btn" onclick="unbanIP('${esc(ip)}')">✓ Unban</button></td>
+      </tr>`).join('')}
+    </table>`:`<div class="empty">No banned IPs</div>`}
+  </div>
+  <p style="font-size:.75rem;color:var(--mu);margin-top:8px">Banned IPs are permanently blocked from connecting. They are stored in stats.json and survive server restarts.</p>`;
+}
+
 function renderBanned(){
   const banned = allSessions.filter(u=>u.banned);
   const savedBanned = statsData.bannedCount||0;
@@ -453,6 +522,31 @@ async function sendBroadcast(){
 }
 
 function openImg(url){ window.open(url,'_blank'); }
+
+async function banIPFromViolation(ip){
+  if(!confirm(`Permanently ban IP ${ip}? All users with this IP will be disconnected.`)) return;
+  const r = await api('POST','/admin/api/ban-ip',{ip});
+  showToast(`IP ${ip} banned (${r?.kicked||0} kicked)`,'ok'); loadAll();
+}
+
+async function banIPManual(){
+  const ip = document.getElementById('newIPInput')?.value.trim();
+  if(!ip){ showToast('Enter an IP address','err'); return; }
+  if(!confirm(`Permanently ban IP ${ip}?`)) return;
+  const r = await api('POST','/admin/api/ban-ip',{ip});
+  showToast(`IP ${ip} banned`,'ok'); loadAll();
+}
+
+async function unbanIP(ip){
+  await api('POST','/admin/api/unban-ip',{ip});
+  showToast(`IP ${ip} unbanned`,'ok'); loadAll();
+}
+
+async function clearViolations(){
+  if(!confirm('Clear all violation records? This cannot be undone.')) return;
+  await api('DELETE','/admin/api/violations');
+  allViolations=[]; showToast('Violations cleared','ok'); renderTab('violations');
+}
 
 // ── Utils ─────────────────────────────────────────────
 function fmtBytes(b){
