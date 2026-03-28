@@ -17,22 +17,19 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
-// Keep-alive: prevent Render free tier from sleeping
 const RENDER_URL = process.env.RENDER_EXTERNAL_URL;
 if (RENDER_URL) {
-  setInterval(() => {
-    fetch(RENDER_URL).catch(() => {});
-  }, 14 * 60 * 1000); // ping every 14 minutes
+  setInterval(() => { fetch(RENDER_URL).catch(() => {}); }, 14 * 60 * 1000);
 }
 
-// In-memory stores (no persistent DB)
 const waitingQueue = [];
-const activePairs = new Map(); // socketId -> partnerId
-const userNames = new Map(); // socketId -> name
-const chatMessages = new Map(); // roomId -> [messages]
-const userRooms = new Map(); // socketId -> roomId
+const activePairs = new Map();
+const userNames = new Map();
+const userCountries = new Map();
+const chatMessages = new Map();
+const userRooms = new Map();
+const userWarnings = new Map();
 
-// Temp upload dir - cleaned after chat ends
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -46,32 +43,38 @@ app.use(express.json());
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// File upload endpoint
+app.get('/api/country', async (req, res) => {
+  try {
+    const ip = (req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '').replace('::ffff:','');
+    const response = await fetch(`http://ip-api.com/json/${ip}?fields=country,countryCode`, { signal: AbortSignal.timeout(3000) });
+    const data = await response.json();
+    if (data.countryCode) {
+      const flag = data.countryCode.toUpperCase().split('').map(c => String.fromCodePoint(0x1F1E6 - 65 + c.charCodeAt(0))).join('');
+      res.json({ country: data.country, code: data.countryCode, flag });
+    } else {
+      res.json({ country: 'Unknown', code: 'XX', flag: '🌍' });
+    }
+  } catch (e) {
+    res.json({ country: 'Unknown', code: 'XX', flag: '🌍' });
+  }
+});
+
 app.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   res.json({ url: `/uploads/${req.file.filename}`, filename: req.file.filename, mimetype: req.file.mimetype });
 });
 
-// Random name generator
 const adj = ['Swift','Cosmic','Neon','Silent','Wild','Vivid','Lunar','Mystic','Pixel','Frosted','Electric','Amber','Crystal','Shadow','Velvet'];
 const nouns = ['Fox','Panda','Wolf','Eagle','Comet','Nova','Drift','Spark','Blaze','Storm','Raven','Tiger','Lynx','Hawk','Orca'];
 function randomName() {
   return adj[Math.floor(Math.random()*adj.length)] + nouns[Math.floor(Math.random()*nouns.length)] + Math.floor(Math.random()*99+1);
 }
 
-function getRoomId(a, b) {
-  return [a, b].sort().join('::');
-}
+function getRoomId(a, b) { return [a, b].sort().join('::'); }
 
 function cleanupRoom(roomId) {
   const msgs = chatMessages.get(roomId) || [];
-  // Delete uploaded files
-  msgs.forEach(m => {
-    if (m.filename) {
-      const fp = path.join(UPLOAD_DIR, m.filename);
-      if (fs.existsSync(fp)) fs.unlink(fp, () => {});
-    }
-  });
+  msgs.forEach(m => { if (m.filename) { const fp = path.join(UPLOAD_DIR, m.filename); if (fs.existsSync(fp)) fs.unlink(fp, () => {}); } });
   chatMessages.delete(roomId);
 }
 
@@ -80,56 +83,76 @@ function disconnectPair(socketId) {
   if (partnerId) {
     const roomId = userRooms.get(socketId);
     cleanupRoom(roomId);
-    activePairs.delete(socketId);
-    activePairs.delete(partnerId);
-    userRooms.delete(socketId);
-    userRooms.delete(partnerId);
+    activePairs.delete(socketId); activePairs.delete(partnerId);
+    userRooms.delete(socketId); userRooms.delete(partnerId);
     return partnerId;
   }
   return null;
 }
 
+const BAD_WORDS = [
+  'fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard',
+  'motherfucker','asshole','faggot','retard','rape','porn','nude','naked','fck','fuk','sh1t',
+  'magi','chudi','choda','baler','madarchod','bokachoda','khanki','harami','hijra','shala','sala',
+  'kutir','kutti','gandu','randi','lavda','lauda','bhosdi','choot',
+  'kuss','sharmouta','ahba','zebi',
+  'puta','pendejo','cabron','maricon','verga','culo','joder','mierda',
+  'chutiya','gaandu','bhadwa','haramzada','behenchod',
+  'putain','merde','salope','connard','batard',
+  'porra','caralho','buceta','viado',
+  'blyad','pizda','khuy','mudak','suka',
+  'ficken','hurensohn','wichser',
+  'anjing','bangsat','kontol','memek','bajingan','goblok',
+  'orospu','siktir','pezevenk',
+  'putangina','gago','tangina','leche'
+];
+
+function checkBadWords(text) {
+  const norm = text.toLowerCase().replace(/[@4][s$5]/g,'as').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e');
+  return BAD_WORDS.some(w => norm.includes(w));
+}
+
+function censorText(text) {
+  let r = text;
+  BAD_WORDS.forEach(w => {
+    const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi');
+    r = r.replace(re, m => m[0] + '*'.repeat(Math.max(m.length-2,1)) + (m.length>1 ? m[m.length-1] : ''));
+  });
+  return r;
+}
+
 io.on('connection', (socket) => {
   const name = randomName();
   userNames.set(socket.id, name);
+  userWarnings.set(socket.id, 0);
   socket.emit('assigned_name', name);
 
+  socket.on('set_country', (data) => { userCountries.set(socket.id, data); });
+
   socket.on('find_partner', () => {
-    // Remove from waiting if already there
     const wi = waitingQueue.indexOf(socket.id);
     if (wi > -1) waitingQueue.splice(wi, 1);
-
-    // Disconnect existing pair
     const oldPartner = disconnectPair(socket.id);
-    if (oldPartner) {
-      io.to(oldPartner).emit('partner_left');
-    }
+    if (oldPartner) io.to(oldPartner).emit('partner_left');
 
     if (waitingQueue.length > 0) {
       const partnerId = waitingQueue.shift();
       const partnerSocket = io.sockets.sockets.get(partnerId);
-      if (!partnerSocket) {
-        // Partner disconnected, try again
-        socket.emit('searching');
-        waitingQueue.push(socket.id);
-        return;
-      }
+      if (!partnerSocket) { waitingQueue.push(socket.id); socket.emit('searching'); return; }
 
       const roomId = getRoomId(socket.id, partnerId);
-      activePairs.set(socket.id, partnerId);
-      activePairs.set(partnerId, socket.id);
-      userRooms.set(socket.id, roomId);
-      userRooms.set(partnerId, roomId);
+      activePairs.set(socket.id, partnerId); activePairs.set(partnerId, socket.id);
+      userRooms.set(socket.id, roomId); userRooms.set(partnerId, roomId);
       chatMessages.set(roomId, []);
-
-      socket.join(roomId);
-      partnerSocket.join(roomId);
+      socket.join(roomId); partnerSocket.join(roomId);
 
       const myName = userNames.get(socket.id);
       const partnerName = userNames.get(partnerId);
+      const myCountry = userCountries.get(socket.id) || { flag:'🌍', country:'Unknown', code:'XX' };
+      const partnerCountry = userCountries.get(partnerId) || { flag:'🌍', country:'Unknown', code:'XX' };
 
-      socket.emit('connected', { partnerName, myName });
-      partnerSocket.emit('connected', { partnerName: myName, myName: partnerName });
+      socket.emit('connected', { partnerName, myName, partnerCountry, myCountry });
+      partnerSocket.emit('connected', { partnerName: myName, myName: partnerName, partnerCountry: myCountry, myCountry: partnerCountry });
     } else {
       waitingQueue.push(socket.id);
       socket.emit('searching');
@@ -140,18 +163,22 @@ io.on('connection', (socket) => {
     const partnerId = activePairs.get(socket.id);
     if (!partnerId) return;
     const roomId = userRooms.get(socket.id);
+
+    if (data.type === 'text' && data.text) {
+      if (checkBadWords(data.text)) {
+        const warns = (userWarnings.get(socket.id) || 0) + 1;
+        userWarnings.set(socket.id, warns);
+        socket.emit('content_warning', { warns, max: 3 });
+        if (warns >= 3) { socket.emit('banned'); setTimeout(() => socket.disconnect(), 1000); return; }
+        data.text = censorText(data.text);
+      }
+    }
+
     const msg = {
-      id: uuidv4(),
-      from: socket.id,
-      name: userNames.get(socket.id),
-      type: data.type || 'text',
-      text: data.text || '',
-      url: data.url || null,
-      filename: data.filename || null,
-      mimetype: data.mimetype || null,
-      emoji: data.emoji || null,
-      gif: data.gif || null,
-      timestamp: Date.now()
+      id: uuidv4(), from: socket.id, name: userNames.get(socket.id),
+      type: data.type || 'text', text: data.text || '',
+      url: data.url || null, filename: data.filename || null, mimetype: data.mimetype || null,
+      gif: data.gif || null, timestamp: Date.now()
     };
     const msgs = chatMessages.get(roomId) || [];
     msgs.push(msg);
@@ -159,39 +186,17 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('new_message', msg);
   });
 
-  socket.on('typing', (isTyping) => {
-    const partnerId = activePairs.get(socket.id);
-    if (partnerId) io.to(partnerId).emit('partner_typing', isTyping);
-  });
-
+  socket.on('typing', (isTyping) => { const p = activePairs.get(socket.id); if (p) io.to(p).emit('partner_typing', isTyping); });
   socket.on('skip', () => {
-    const partnerId = disconnectPair(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit('partner_left');
-    }
-    // Re-search
-    const wi = waitingQueue.indexOf(socket.id);
-    if (wi > -1) waitingQueue.splice(wi, 1);
-    waitingQueue.push(socket.id);
-    socket.emit('searching');
+    const p = disconnectPair(socket.id); if (p) io.to(p).emit('partner_left');
+    const wi = waitingQueue.indexOf(socket.id); if (wi > -1) waitingQueue.splice(wi, 1);
+    waitingQueue.push(socket.id); socket.emit('searching');
   });
-
-  socket.on('end_chat', () => {
-    const partnerId = disconnectPair(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit('partner_left');
-    }
-    socket.emit('chat_ended');
-  });
-
+  socket.on('end_chat', () => { const p = disconnectPair(socket.id); if (p) io.to(p).emit('partner_left'); socket.emit('chat_ended'); });
   socket.on('disconnect', () => {
-    const wi = waitingQueue.indexOf(socket.id);
-    if (wi > -1) waitingQueue.splice(wi, 1);
-    const partnerId = disconnectPair(socket.id);
-    if (partnerId) {
-      io.to(partnerId).emit('partner_left');
-    }
-    userNames.delete(socket.id);
+    const wi = waitingQueue.indexOf(socket.id); if (wi > -1) waitingQueue.splice(wi, 1);
+    const p = disconnectPair(socket.id); if (p) io.to(p).emit('partner_left');
+    userNames.delete(socket.id); userCountries.delete(socket.id); userWarnings.delete(socket.id);
   });
 });
 
