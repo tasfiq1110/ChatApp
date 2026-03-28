@@ -417,23 +417,6 @@ async function detectCountry(){
 // ══════════════════════════════════════════════════════
 //  SCREENSHOT DETECTION
 // ══════════════════════════════════════════════════════
-// Detect Print Screen key press
-document.addEventListener('keyup', e => {
-  if (e.key === 'PrintScreen' || e.key === 'Print' || e.keyCode === 44) {
-    socket.emit('screenshot_taken');
-    toast('📸 Screenshot taken — your partner was notified');
-  }
-});
-// Also detect visibility change (common when taking screenshots on mobile)
-let lastVisible = true;
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && !lastVisible) {
-    // returning from hidden might indicate screenshot on some devices
-  }
-  lastVisible = !document.hidden;
-});
-
-// ══════════════════════════════════════════════════════
 //  SOCKET
 // ══════════════════════════════════════════════════════
 const socket=io({transports:['websocket','polling'],reconnection:true,reconnectionAttempts:10,reconnectionDelay:1000,timeout:20000});
@@ -821,6 +804,47 @@ function toast(msg,type){
   clearTimeout(toastTmr);toastTmr=setTimeout(()=>t.classList.remove('show'),3500);
 }
 
+// ══════════════════════════════════════════════════════
+//  SCREENSHOT DETECTION (after socket is defined)
+// ══════════════════════════════════════════════════════
+function notifyScreenshot() {
+  if (!paired) return;
+  socket.emit('screenshot_taken');
+  toast('📸 Your partner was notified of your screenshot');
+}
+
+// Desktop: PrintScreen key
+document.addEventListener('keyup', e => {
+  if (e.key === 'PrintScreen' || e.key === 'Print' || e.keyCode === 44) {
+    notifyScreenshot();
+  }
+});
+
+// Android/Mobile: visibility change trick
+// When user presses home/recents/notification bar to screenshot, page briefly hides
+let ssHideTime = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    ssHideTime = Date.now();
+  } else {
+    const hiddenFor = Date.now() - ssHideTime;
+    // If page was hidden for less than 2 seconds while chatting, likely a screenshot
+    if (ssHideTime > 0 && hiddenFor < 2000 && paired) {
+      notifyScreenshot();
+    }
+    ssHideTime = 0;
+  }
+});
+
+// Page focus/blur (works on some browsers for screenshot detection)
+window.addEventListener('blur', () => { ssHideTime = Date.now(); });
+window.addEventListener('focus', () => {
+  const hiddenFor = Date.now() - ssHideTime;
+  if (ssHideTime > 0 && hiddenFor < 2000 && paired) {
+    notifyScreenshot();
+  }
+  ssHideTime = 0;
+});
 // ══════════════════════════════════════════════════════
 //  MISC
 // ══════════════════════════════════════════════════════
