@@ -154,7 +154,6 @@ tr:hover td{background:rgba(255,255,255,.02);}
       <div class="nav" onclick="go('media')" id="n-media"><span class="nav-ic">🖼️</span>All Media</div>
       <div class="nav" onclick="go('badwords')" id="n-badwords"><span class="nav-ic">🤬</span>Bad Words<span class="nav-badge" id="bwBadge">0</span></div>
       <div class="nav" onclick="go('nudity')" id="n-nudity"><span class="nav-ic">🔞</span>Nudity<span class="nav-badge" id="nudBadge">0</span></div>
-      <div class="nav" onclick="go('wordlist')" id="n-wordlist"><span class="nav-ic">📝</span>Word Lists</div>
       <div class="nav" onclick="go('words')" id="n-words"><span class="nav-ic">📝</span>Word Lists</div>
       <div class="nav" onclick="go('ipbans')" id="n-ipbans"><span class="nav-ic">🔒</span>IP Bans</div>
       <div class="nav" onclick="go('banned')" id="n-banned"><span class="nav-ic">🚫</span>Banned Users</div>
@@ -675,20 +674,6 @@ async function sendBC() {
   toast(`Sent to ${r?.sent||0} users`,'ok'); G('bcMsg').value='';
 }
 async function addWord(type) {
-  const inp = G(type==='bad'?'newBadWord':'newNudityWord');
-  const word = inp?.value.trim().toLowerCase();
-  if (!word) { toast('Enter a word','err'); return; }
-  const r = await api('POST', `/admin/api/words/${type}`, {word});
-  if (r?.ok) { toast(`"${word}" added`,'ok'); inp.value=''; await loadAll(); }
-  else toast('Failed','err');
-}
-async function removeWord(type, word) {
-  const r = await api('DELETE', `/admin/api/words/${type}/${encodeURIComponent(word)}`);
-  if (r?.ok) { toast(`"${word}" removed`,'ok'); await loadAll(); }
-  else toast('Failed','err');
-}
-
-async function addWord(type) {
   const id = type==='bad' ? 'newBadWord' : 'newNudityWord';
   const word = G(id)?.value.trim().toLowerCase();
   if (!word) { toast('Enter a word first','err'); return; }
@@ -713,10 +698,11 @@ async function removeWord(type, word) {
 }
 
 async function clearViol(type) {
-  if(!confirm(`Clear all ${type} violation records?`)) return;
-  // Clear just this type from front-end; server clears all (filter client-side)
-  await api('DELETE','/admin/api/violations');
-  D.violations=[]; toast('Cleared','ok'); render();
+  const label = type==='badword' ? 'bad word' : 'nudity';
+  if(!confirm(`Clear all ${label} violation records?`)) return;
+  await api('DELETE', `/admin/api/violations?type=${type}`);
+  D.violations = D.violations.filter(v => v.type !== type);
+  toast(`${label} violations cleared`,'ok'); render();
 }
 
 // ── HELPERS ───────────────────────────────────────────
