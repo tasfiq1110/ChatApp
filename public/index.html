@@ -748,13 +748,33 @@ body {
 <div class="toast" id="toast"></div>
 
 <script>
-const socket = io();
+const socket = io({
+  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000,
+  timeout: 20000
+});
 let myName = '';
 let partnerName = '';
 let typingTimer = null;
 let isTyping = false;
 let activePanel = null;
 let totalChats = Math.floor(Math.random()*5000+1000);
+
+socket.on('connect', () => {
+  document.querySelector('.start-btn').disabled = false;
+  document.querySelector('.start-btn').textContent = 'Start Chatting ⚡';
+});
+socket.on('connect_error', () => {
+  document.querySelector('.start-btn').textContent = 'Connecting... ⏳';
+  document.querySelector('.start-btn').disabled = true;
+});
+socket.on('disconnect', () => {
+  if (document.getElementById('chat').classList.contains('active')) {
+    addSysMsg('Connection lost. Reconnecting...');
+  }
+});
 
 // ===================== SOCKET EVENTS =====================
 socket.on('assigned_name', name => {
