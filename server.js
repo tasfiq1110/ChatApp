@@ -58,29 +58,81 @@ app.post('/upload', upload.single('file'), (req, res) => {
   res.json({ url: `/uploads/${req.file.filename}`, filename: req.file.filename, mimetype: req.file.mimetype });
 });
 
+// ── Helpers ───────────────────────────────────────────
 const adj   = ['Swift','Cosmic','Neon','Silent','Wild','Vivid','Lunar','Mystic','Pixel','Frosted','Electric','Amber','Crystal','Shadow','Velvet'];
 const nouns = ['Fox','Panda','Wolf','Eagle','Comet','Nova','Drift','Spark','Blaze','Storm','Raven','Tiger','Lynx','Hawk','Orca'];
 function randomName() { return adj[Math.floor(Math.random()*adj.length)] + nouns[Math.floor(Math.random()*nouns.length)] + Math.floor(Math.random()*99+1); }
-function getRoomId(a,b) { return [a,b].sort().join('::'); }
+function getRoomId(a, b) { return [a,b].sort().join('::'); }
 
-function cleanupRoom(roomId) {
-  const msgs = chatMessages.get(roomId) || [];
-  msgs.forEach(m => { if (m.filename) { const fp = path.join(UPLOAD_DIR, m.filename); if (fs.existsSync(fp)) fs.unlink(fp, () => {}); } });
-  chatMessages.delete(roomId);
+function removeFromQueue(socketId) {
+  for (let i = waitingQueue.length - 1; i >= 0; i--) {
+    if (waitingQueue[i] === socketId) waitingQueue.splice(i, 1);
+  }
+}
+
+function cleanQueue() {
+  for (let i = waitingQueue.length - 1; i >= 0; i--) {
+    if (!io.sockets.sockets.get(waitingQueue[i])) waitingQueue.splice(i, 1);
+  }
 }
 
 function disconnectPair(socketId) {
   const partnerId = activePairs.get(socketId);
-  if (partnerId) {
-    const roomId = userRooms.get(socketId);
-    cleanupRoom(roomId);
-    activePairs.delete(socketId); activePairs.delete(partnerId);
-    userRooms.delete(socketId); userRooms.delete(partnerId);
-    return partnerId;
+  if (!partnerId) return null;
+  const roomId = userRooms.get(socketId);
+  if (roomId) {
+    const msgs = chatMessages.get(roomId) || [];
+    msgs.forEach(m => {
+      if (m.filename) { const fp = path.join(UPLOAD_DIR, m.filename); if (fs.existsSync(fp)) fs.unlink(fp, () => {}); }
+    });
+    chatMessages.delete(roomId);
   }
-  return null;
+  activePairs.delete(socketId);
+  activePairs.delete(partnerId);
+  userRooms.delete(socketId);
+  userRooms.delete(partnerId);
+  return partnerId;
 }
 
+// ── THE FIX: one shared matchmaking function ──────────
+// Both find_partner and skip call this. It tries to match
+// immediately — no queuing delay, no missed connections.
+function matchOrWait(socket) {
+  removeFromQueue(socket.id); // ensure no duplicates
+  cleanQueue();               // remove dead sockets first
+
+  while (waitingQueue.length > 0) {
+    const partnerId = waitingQueue.shift();
+    if (partnerId === socket.id) continue; // skip self
+    const partnerSocket = io.sockets.sockets.get(partnerId);
+    if (!partnerSocket) continue; // skip disconnected
+
+    // Connect the pair
+    const roomId = getRoomId(socket.id, partnerId);
+    activePairs.set(socket.id, partnerId);
+    activePairs.set(partnerId, socket.id);
+    userRooms.set(socket.id, roomId);
+    userRooms.set(partnerId, roomId);
+    chatMessages.set(roomId, []);
+    socket.join(roomId);
+    partnerSocket.join(roomId);
+
+    const myName         = userNames.get(socket.id);
+    const partnerName    = userNames.get(partnerId);
+    const myCountry      = userCountries.get(socket.id)  || { flag:'', name:'', code:'' };
+    const partnerCountry = userCountries.get(partnerId)  || { flag:'', name:'', code:'' };
+
+    socket.emit('connected',        { partnerName, myName, partnerCountry });
+    partnerSocket.emit('connected', { partnerName: myName, myName: partnerName, partnerCountry: myCountry });
+    return; // matched — done
+  }
+
+  // Nobody waiting — join queue
+  waitingQueue.push(socket.id);
+  socket.emit('searching');
+}
+
+// ── Profanity ─────────────────────────────────────────
 const BAD_WORDS = ['fuck','shit','bitch','dick','pussy','cock','cunt','nigger','nigga','whore','slut','bastard','motherfucker','asshole','faggot','rape','porn','nude','naked','fck','fuk','magi','chudi','choda','madarchod','bokachoda','khanki','harami','shala','sala','gandu','randi','lavda','lauda','bhosdi','choot','bhenchod','chutiya','bhadwa','haramzada','behenchod','kuss','sharmouta','puta','pendejo','cabron','maricon','verga','joder','mierda','putain','merde','salope','connard','blyad','pizda','khuy','mudak','hurensohn','wichser','anjing','bangsat','kontol','memek','bajingan','orospu','siktir','putangina','gago','tangina'];
 function checkBadWords(text) {
   const n = text.toLowerCase().replace(/[@4]/g,'a').replace(/[1!|]/g,'i').replace(/0/g,'o').replace(/3/g,'e').replace(/\$/g,'s');
@@ -92,47 +144,37 @@ function censorText(text) {
   return r;
 }
 
+// ── Socket.IO ─────────────────────────────────────────
 io.on('connection', (socket) => {
-  const name = randomName();
-  userNames.set(socket.id, name);
+  userNames.set(socket.id, randomName());
   userWarnings.set(socket.id, 0);
-  socket.emit('assigned_name', name);
+  socket.emit('assigned_name', userNames.get(socket.id));
 
   socket.on('set_country', (data) => userCountries.set(socket.id, data));
 
+  // find_partner: used when first clicking "Start Chatting"
   socket.on('find_partner', () => {
-    const wi = waitingQueue.indexOf(socket.id);
-    if (wi > -1) waitingQueue.splice(wi, 1);
-    const oldPartner = disconnectPair(socket.id);
-    if (oldPartner) io.to(oldPartner).emit('partner_left');
+    const old = disconnectPair(socket.id);
+    if (old) io.to(old).emit('partner_left');
+    matchOrWait(socket);
+  });
 
-    if (waitingQueue.length > 0) {
-      const partnerId = waitingQueue.shift();
-      const partnerSocket = io.sockets.sockets.get(partnerId);
-      if (!partnerSocket) { waitingQueue.push(socket.id); socket.emit('searching'); return; }
+  // skip: leave current chat and immediately try to find a new partner
+  socket.on('skip', () => {
+    const old = disconnectPair(socket.id);
+    if (old) io.to(old).emit('partner_left');
+    matchOrWait(socket); // same function — connects immediately if anyone is waiting
+  });
 
-      const roomId = getRoomId(socket.id, partnerId);
-      activePairs.set(socket.id, partnerId); activePairs.set(partnerId, socket.id);
-      userRooms.set(socket.id, roomId); userRooms.set(partnerId, roomId);
-      chatMessages.set(roomId, []);
-      socket.join(roomId); partnerSocket.join(roomId);
-
-      const myName        = userNames.get(socket.id);
-      const partnerName   = userNames.get(partnerId);
-      const myCountry     = userCountries.get(socket.id)  || { flag:'', name:'', code:'' };
-      const partnerCountry= userCountries.get(partnerId)  || { flag:'', name:'', code:'' };
-
-      socket.emit('connected',        { partnerName, myName, partnerCountry });
-      partnerSocket.emit('connected', { partnerName: myName, myName: partnerName, partnerCountry: myCountry });
-    } else {
-      waitingQueue.push(socket.id);
-      socket.emit('searching');
-    }
+  socket.on('end_chat', () => {
+    const old = disconnectPair(socket.id);
+    if (old) io.to(old).emit('partner_left');
+    removeFromQueue(socket.id);
+    socket.emit('chat_ended');
   });
 
   socket.on('send_message', (data) => {
-    const partnerId = activePairs.get(socket.id);
-    if (!partnerId) return;
+    const partnerId = activePairs.get(socket.id); if (!partnerId) return;
     const roomId = userRooms.get(socket.id);
     if (data.type === 'text' && data.text) {
       if (checkBadWords(data.text)) {
@@ -144,9 +186,7 @@ io.on('connection', (socket) => {
       }
     }
     const msg = { id:uuidv4(), from:socket.id, type:data.type||'text', text:data.text||'', url:data.url||null, filename:data.filename||null, mimetype:data.mimetype||null, gif:data.gif||null, reactions:{}, timestamp:Date.now() };
-    const msgs = chatMessages.get(roomId)||[];
-    msgs.push(msg);
-    chatMessages.set(roomId, msgs);
+    const msgs = chatMessages.get(roomId)||[]; msgs.push(msg); chatMessages.set(roomId, msgs);
     io.to(roomId).emit('new_message', msg);
   });
 
@@ -182,16 +222,13 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('reaction_updated', { msgId, reactions:msg.reactions });
   });
 
-  socket.on('skip', () => {
-    const p=disconnectPair(socket.id); if(p) io.to(p).emit('partner_left');
-    const wi=waitingQueue.indexOf(socket.id); if(wi>-1) waitingQueue.splice(wi,1);
-    waitingQueue.push(socket.id); socket.emit('searching');
-  });
-  socket.on('end_chat', () => { const p=disconnectPair(socket.id); if(p) io.to(p).emit('partner_left'); socket.emit('chat_ended'); });
   socket.on('disconnect', () => {
-    const wi=waitingQueue.indexOf(socket.id); if(wi>-1) waitingQueue.splice(wi,1);
-    const p=disconnectPair(socket.id); if(p) io.to(p).emit('partner_left');
-    userNames.delete(socket.id); userCountries.delete(socket.id); userWarnings.delete(socket.id);
+    removeFromQueue(socket.id);
+    const old = disconnectPair(socket.id);
+    if (old) io.to(old).emit('partner_left');
+    userNames.delete(socket.id);
+    userCountries.delete(socket.id);
+    userWarnings.delete(socket.id);
   });
 });
 
